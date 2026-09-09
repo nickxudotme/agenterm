@@ -1409,6 +1409,7 @@ impl SettingsView {
             vec![
                 SettingsNavItem::Page(SettingsSection::Appearance),
                 SettingsNavItem::Page(SettingsSection::Keybindings),
+                SettingsNavItem::Page(SettingsSection::Warpify),
                 SettingsNavItem::Page(SettingsSection::About),
             ]
         } else {

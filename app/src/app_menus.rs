@@ -67,7 +67,7 @@ fn edit_menu() -> Menu {
         "Edit",
         vec![
             action_item("Copy", CustomAction::Copy),
-            MenuItem::Standard(StandardAction::Paste),
+            action_item("Paste", CustomAction::Paste),
             action_item("Select All", CustomAction::SelectAll),
             MenuItem::Separator,
             action_item("Find", CustomAction::Find),
@@ -136,3 +136,7 @@ fn dispatch_action(action: CustomAction) -> impl Fn(&mut AppContext) + 'static {
 fn no_updates(_: &MenuItemProperties, _: &mut AppContext) -> MenuItemPropertyChanges {
     Default::default()
 }
+
+#[cfg(test)]
+#[path = "app_menus_tests.rs"]
+mod tests;

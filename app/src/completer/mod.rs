@@ -152,6 +152,11 @@ impl SessionContext {
                             })
                         }
                         CommandExitStatus::Failure => {
+                            log::warn!(
+                                "Remote directory listing failed: directory={directory:?} exit_code={:?} output_bytes={}",
+                                command_output.exit_code,
+                                command_output.output().len()
+                            );
                             safe_warn!(
                                 safe: ("Executing `ls` on remote box failed with non-zero status code."),
                                 full: ("Executing `ls` on remote box failed with error: {}", &String::from_utf8_lossy(command_output.output()))

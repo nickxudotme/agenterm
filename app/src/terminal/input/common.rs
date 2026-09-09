@@ -3,6 +3,7 @@ use std::sync::Arc;
 use pathfinder_geometry::vector::vec2f;
 use vim::vim::{VimMode, VimState};
 use warp_completer::completer::Description;
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::features::FeatureFlag;
 use warpui::elements::{
     AnchorPair, Border, ChildAnchor, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment,
@@ -25,7 +26,6 @@ use crate::terminal::model::TerminalModel;
 use crate::terminal::view::{PADDING_LEFT, TerminalAction};
 use crate::ui_components::icons::Icon;
 use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces};
-use warp_core::channel::{Channel, ChannelState};
 
 /// Whether the terminal input message bar should be shown.
 ///

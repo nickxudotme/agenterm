@@ -76,11 +76,74 @@ channel, needs write/execute permission plus archive tools and either
 newer. The upstream source itself still has a TODO for how that extension
 should work on the OSS channel. Keep it disabled in Agenterm.
 
-For strict enterprise access, prefer ordinary SSH by default and make basic
-SSH Warpify a per-host opt-in. `ssh -J bastion target` is preferable to an
-interactive `ssh bastion` followed by another SSH: the current wrapper does
-not recursively bootstrap an SSH session launched from an already remote
-shell.
+For strict enterprise access, preserve ordinary SSH and company authentication.
+Do not assume ProxyJump works: some bastions prohibit forwarding. The current
+wrapper does not recursively bootstrap an SSH session launched from an already
+remote shell.
+
+## September 10 investigation checkpoint
+
+### Changes in this checkpoint
+
+- Expose the Warpify settings page in the OSS navigation.
+- Route Edit > Paste through `CustomAction::Paste`, like the working terminal
+  context menu. The previous native `paste:` menu action had no receiver in the
+  terminal window. A regression test checks the custom item and shortcut.
+- Add temporary warning-level diagnostics for in-band command cancellation,
+  failed result IDs/exit codes/output sizes, and failed directory-listing paths.
+  These diagnostics do not add full command bodies or output contents to logs.
+  Remove or lower their verbosity after resolving the issue.
+
+### Verified and rejected hypotheses
+
+- Fixed-byte DCS and OSC probes arrived byte-for-byte intact. Earlier claims of
+  filtering/truncation were based on incorrectly quoted probes and are withdrawn.
+- The restricted bastion lacks bootstrap utilities by policy. Do not install
+  substitutes or evade the whitelist. This route remains unsupported.
+- Direct interactive SSH to the final target works. A constructed noninteractive
+  nested SSH invocation failed authentication; that did not mean the user's normal
+  login was broken. Preserve the configured interactive route.
+- On the final target, a disposable Bash 4.2 child running the real repository
+  bootstrap emitted Bootstrapped, Preexec, CommandFinished and Precmd. Commands
+  with exit codes 0 and 1 were reported correctly. No RC files were modified.
+- Isolated directory listing and generator encoding succeeded on that target.
+- Hosts with a configured RemoteCommand fall back to plain SSH. Automatic
+  Warpification of the final target has NOT been implemented.
+- Manual integration can use the existing SourcedRcFileForWarp hook from an
+  already authenticated Bash prompt. Do not synthesize Bootstrapped or use an
+  InitSubshell hook without a client-registered session ID.
+
+### Remaining failure and next investigation
+
+The user observed the integrated UI after manual initialization, but background
+completion still fails. New diagnostics show the remote directory listing is
+given the preceding local macOS home path and exits with code 1. This is a
+cross-session context problem, not evidence that the target lacks `find`.
+
+Cancellation logs also explain a mismatched result: a consumer cancelled its
+request before the old remote result arrived. This is not yet proven to cause
+the directory failure; do not change scheduling based on that warning alone.
+
+Inspect `BlockList::apply_precmd_to_active` in `app/src/terminal/model/blocks.rs`:
+in-band prompts reuse `last_populated_precmd_payload` without checking session
+identity. This is a candidate, NOT a verified root cause. Trace initial remote
+Precmd delivery and Input's active block metadata before fixing it. Add a
+local-to-remote transition regression test, then verify command blocks, paths,
+completion and exit behavior in the actual app before adding automatic entry.
+
+### Verification and delivery status
+
+- `cargo check -p warp --bin agenterm --features gui`: passed.
+- Menu regression: 1 passed; existing in-band executor tests: 9 passed.
+- `./script/run --dont-open`: build, bundle and signing passed.
+- Repository format check passed (including one pre-existing import-order fix).
+- Full presubmit Clippy was not completed. The first workspace attempt required
+  Yarn 4.0.1; after installing the pinned JS dependencies, checks were restarted
+  and then interrupted at the user's request to push this checkpoint immediately.
+- The new local app was started. Native menu interaction still needs user
+  confirmation; do not equate the structural menu test with GUI verification.
+- The SSH/remote completion task is incomplete. Do not report this checkpoint
+  as a completed automatic Warpify fix.
 
 ## Suggested next steps
 

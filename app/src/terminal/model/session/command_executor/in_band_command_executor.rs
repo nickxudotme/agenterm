@@ -176,6 +176,7 @@ impl InBandCommandExecutor {
             if cmd.id != command_id {
                 return;
             }
+            log::warn!("In-band diagnostic: internally_cancelled id={command_id}");
             if let Some(output_tx) = cmd.output_tx.clone()
                 && !output_tx.is_closed()
             {
@@ -207,6 +208,14 @@ impl InBandCommandExecutor {
             let mut current_command = self.running_command.lock();
             if let Some(cmd) = current_command.take() {
                 if cmd.id == event.command_id {
+                    if event.exit_code != 0 {
+                        log::warn!(
+                            "In-band diagnostic: failed id={} exit_code={} output_bytes={}",
+                            event.command_id,
+                            event.exit_code,
+                            event.output.len()
+                        );
+                    }
                     if let Some(output_tx) = cmd.output_tx
                         && !output_tx.is_closed()
                     {
@@ -267,6 +276,7 @@ impl InBandCommandExecutor {
             .any(|item| item.id == command_id);
 
         if cmd_is_running {
+            log::warn!("In-band diagnostic: consumer_cancelled_running id={command_id}");
             self.running_command.lock().take();
         }
 
