@@ -24,6 +24,7 @@ use super::settings_page::{
     SettingsWidget, render_sub_header,
 };
 use crate::appearance::Appearance;
+use crate::channel::{Channel, ChannelState};
 use crate::editor::{
     EditorView, Event as EditorEvent, PropagateAndNoOpNavigationKeys, SingleLineEditorOptions,
     TextOptions,
@@ -32,7 +33,7 @@ use crate::keyboard::{UserDefinedKeybinding, write_custom_keybinding};
 use crate::search_bar::SearchBar;
 use crate::settings::CloudPreferencesSettings;
 use crate::util::bindings::{
-    CommandBinding, filter_bindings_including_keystroke, reset_keybinding_to_default,
+    BindingGroup, CommandBinding, filter_bindings_including_keystroke, reset_keybinding_to_default,
     set_custom_keybinding,
 };
 use crate::{TelemetryEvent, send_telemetry_from_ctx, themes};
@@ -52,6 +53,43 @@ const RESET_BUTTON_TEXT: &str = "Default";
 const CANCEL_BUTTON_TEXT: &str = "Cancel";
 const CLEAR_BUTTON_TEXT: &str = "Clear";
 const SAVE_BUTTON_TEXT: &str = "Save";
+
+fn should_show_binding(binding: &CommandBinding) -> bool {
+    if !matches!(ChannelState::channel(), Channel::Oss) {
+        return true;
+    }
+
+    let supported_group = matches!(
+        binding.group,
+        None | Some(BindingGroup::Settings)
+            | Some(BindingGroup::Close)
+            | Some(BindingGroup::Navigation)
+            | Some(BindingGroup::KeyboardShortcuts)
+            | Some(BindingGroup::Terminal)
+    );
+    if !supported_group {
+        return false;
+    }
+
+    let name = binding.name.to_ascii_lowercase();
+    ![
+        "agent",
+        ":ai_",
+        "_ai_",
+        "nld",
+        "warp_drive",
+        "drive",
+        "mcp",
+        "workflow",
+        "notebook",
+        "environment",
+        "code_review",
+        "project_explorer",
+        "repository",
+    ]
+    .iter()
+    .any(|term| name.contains(term))
+}
 
 /// Notifier for custom keybinding changed. Views could subscribe to this for
 /// KeybindingChangedEvent.
@@ -757,6 +795,7 @@ impl SettingsPageMeta for KeybindingsView {
             lenses
                 .into_iter()
                 .map(|lens| CommandBinding::from_editable_lens(lens, ctx))
+                .filter(should_show_binding)
                 .sorted_by(|a, b| {
                     // Sort by description then name so that we can deduplicate bindings by name.
                     a.description
