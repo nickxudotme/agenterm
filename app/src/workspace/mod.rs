@@ -1100,6 +1100,7 @@ pub fn init(app: &mut AppContext) {
             "Close the current tab",
             WorkspaceAction::CloseActiveTab,
         )
+        .with_mac_key_binding("cmd-w")
         .with_custom_action(CustomAction::CloseTab)
         .with_group(bindings::BindingGroup::Close.as_str())
         .with_context_predicate(

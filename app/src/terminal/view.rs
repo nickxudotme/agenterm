@@ -135,7 +135,7 @@ use uuid::Uuid;
 use vec1::vec1;
 use warp_completer::meta::Span;
 use warp_core::r#async::debounce;
-use warp_core::channel::ChannelState;
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::command::ExitCode;
 use warp_core::context_flag::ContextFlag;
 use warp_core::semantic_selection::SemanticSelection;
@@ -23906,7 +23906,11 @@ impl TerminalView {
 
         // On Local and Dev channels, append an indicator when NLD was overridden.
         // Skip the honor_ps1 case since there's no good place to display the extra text.
-        if !block.honor_ps1() && block.nld_overridden() && ChannelState::enable_debug_features() {
+        if !block.honor_ps1()
+            && block.nld_overridden()
+            && ChannelState::enable_debug_features()
+            && ChannelState::channel() != Channel::Oss
+        {
             prompt.push_str(" (nld overridden)");
         }
 
