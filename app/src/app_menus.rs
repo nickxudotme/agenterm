@@ -23,6 +23,8 @@ fn app_menu() -> Menu {
     Menu::new(
         "Agenterm",
         vec![
+            action_item("Settings…", CustomAction::ShowSettings),
+            MenuItem::Separator,
             MenuItem::Standard(StandardAction::Hide),
             MenuItem::Standard(StandardAction::HideOtherApps),
             MenuItem::Standard(StandardAction::ShowAllApps),

@@ -8660,11 +8660,24 @@ impl Workspace {
             }
         });
 
+        let initial_page = if ChannelState::channel() == Channel::Oss {
+            page.filter(|page| {
+                matches!(
+                    page,
+                    SettingsSection::Appearance
+                        | SettingsSection::Keybindings
+                        | SettingsSection::About
+                )
+            })
+            .unwrap_or(SettingsSection::Appearance)
+        } else {
+            page.unwrap_or_default()
+        };
         let panes_layout = PanesLayout::Snapshot(Box::new(PaneNodeSnapshot::Leaf(LeafSnapshot {
             is_focused: true,
             custom_vertical_tabs_title: None,
             contents: LeafContents::Settings(SettingsPaneSnapshot::Local {
-                current_page: page.unwrap_or_default(),
+                current_page: initial_page,
                 search_query: search_query.map(|s| s.to_owned()),
             }),
         })));
