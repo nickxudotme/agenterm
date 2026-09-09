@@ -2352,12 +2352,14 @@ pub(crate) fn initialize_app(
     ctx.add_singleton_model(NotebookKeybindings::new);
     ctx.add_singleton_model(TerminalKeybindings::new);
     ctx.add_singleton_model(|_| ActiveSession::default());
-    ctx.add_singleton_model(|ctx| {
-        Listener::new(
-            server_api_provider.as_ref(ctx).get_cloud_objects_client(),
-            ctx,
-        )
-    });
+    if !matches!(ChannelState::channel(), Channel::Oss) {
+        ctx.add_singleton_model(|ctx| {
+            Listener::new(
+                server_api_provider.as_ref(ctx).get_cloud_objects_client(),
+                ctx,
+            )
+        });
+    }
 
     #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
     {
