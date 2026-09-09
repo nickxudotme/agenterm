@@ -290,9 +290,7 @@ use crate::palette::PaletteMode;
 use crate::persistence::PersistenceWriter;
 use crate::persistence::model::AgentConversationData;
 use crate::projects::ProjectManagementModel;
-use crate::root_view::{
-    OpenFromRestoredArg, OpenPath, quake_mode_window_id, quake_mode_window_is_open,
-};
+use crate::root_view::{OpenPath, quake_mode_window_id, quake_mode_window_is_open};
 use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::experiments::ServerExperiments;
@@ -3062,15 +3060,6 @@ fn on_close_window_cancelled(
             },
         );
     }
-}
-
-fn is_cloud_agent_web_home_launch_url(url: &Url) -> bool {
-    url.scheme() == ChannelState::url_scheme()
-        && url.host_str() == Some("action")
-        && url.path() == "/new_cloud_agent_conversation"
-        && url
-            .query_pairs()
-            .any(|(key, value)| key == "source" && value == "web_home")
 }
 
 #[::tracing::instrument(skip_all, fields(tags.cloud_agent = true))]
