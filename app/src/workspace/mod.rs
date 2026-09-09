@@ -863,7 +863,8 @@ pub fn init(app: &mut AppContext) {
             WorkspaceAction::ClosePanel,
         )
         .with_context_predicate(id!("Workspace"))
-        .with_custom_action(CustomAction::CloseCurrentSession),
+        .with_custom_action(CustomAction::CloseCurrentSession)
+        .with_enabled(|| ChannelState::channel() != Channel::Oss),
         EditableBinding::new(
             "workspace:toggle_command_palette",
             BindingDescription::new("Toggle command palette")

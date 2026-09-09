@@ -371,7 +371,8 @@ pub fn init(app: &mut AppContext) {
             PaneGroupAction::RemoveActive,
         )
         .with_custom_action(CustomAction::CloseCurrentSession)
-        .with_context_predicate(id!("PaneGroup")),
+        .with_context_predicate(id!("PaneGroup"))
+        .with_enabled(|| ChannelState::channel() != Channel::Oss),
         EditableBinding::new(
             "pane_group:add_left",
             "Split pane left",

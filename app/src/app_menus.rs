@@ -42,9 +42,21 @@ fn file_menu() -> Menu {
                 "New Window",
                 |ctx| ctx.dispatch_global_action("root_view:open_new", &()),
                 no_updates,
-                Some(Keystroke::parse("cmd-shift-N").expect("valid keystroke")),
+                Some(Keystroke::parse("cmd-n").expect("valid keystroke")),
+            )),
+            MenuItem::Custom(CustomMenuItem::new(
+                "New Tab",
+                dispatch_action(CustomAction::NewTab),
+                no_updates,
+                Some(Keystroke::parse("cmd-t").expect("valid keystroke")),
             )),
             MenuItem::Separator,
+            MenuItem::Custom(CustomMenuItem::new(
+                "Close Tab",
+                dispatch_action(CustomAction::CloseTab),
+                no_updates,
+                Some(Keystroke::parse("cmd-w").expect("valid keystroke")),
+            )),
             action_item("Close Window", CustomAction::CloseWindow),
         ],
     )
@@ -107,14 +119,18 @@ pub fn dock_menu() -> Menu {
 fn action_item(name: &'static str, action: CustomAction) -> MenuItem {
     MenuItem::Custom(CustomMenuItem::new(
         name,
-        move |ctx| {
-            if let Some(window_id) = WindowManager::handle(ctx).as_ref(ctx).active_window() {
-                ctx.dispatch_custom_action(action, window_id);
-            }
-        },
+        dispatch_action(action),
         no_updates,
         trigger_to_keystroke(&Trigger::Custom(action.into())),
     ))
+}
+
+fn dispatch_action(action: CustomAction) -> impl Fn(&mut AppContext) + 'static {
+    move |ctx| {
+        if let Some(window_id) = WindowManager::handle(ctx).as_ref(ctx).active_window() {
+            ctx.dispatch_custom_action(action, window_id);
+        }
+    }
 }
 
 fn no_updates(_: &MenuItemProperties, _: &mut AppContext) -> MenuItemPropertyChanges {
