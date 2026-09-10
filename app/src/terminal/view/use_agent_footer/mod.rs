@@ -15,6 +15,7 @@ use crate::terminal::cli_agent_sessions::{CLIAgentInputEntrypoint, CLIAgentSessi
 use crate::terminal::shared_session::{
     SharedSessionActionSource, SharedSessionScrollbackType, SharedSessionSource,
 };
+use crate::terminal::warpify::trigger_state::SshWarpifyOffer;
 use crate::util::image::{MAX_IMAGE_SIZE_BYTES_FOR_CLI_AGENT, MIME_SNIFF_BYTES, infer_mime_type};
 mod warpify_footer;
 
@@ -216,6 +217,7 @@ impl TerminalView {
     ) {
         match event {
             UseAgentToolbarEvent::Dismiss => {
+                self.warpify_state.consume_ssh_offer();
                 self.hide_use_agent_footer_in_blocklist(ctx);
                 send_telemetry_from_ctx!(TelemetryEvent::AgentToolbarDismissed, ctx);
                 ctx.notify();
@@ -277,6 +279,9 @@ impl TerminalView {
             }
             UseAgentToolbarEvent::HideRichInput => {
                 self.close_cli_agent_rich_input_and_disable_auto_toggle(ctx);
+            }
+            UseAgentToolbarEvent::WarpifySsh(offer) => {
+                self.trigger_offered_ssh_bootstrap(offer, ctx);
             }
             UseAgentToolbarEvent::Warpify => {
                 self.hide_use_agent_footer_in_blocklist(ctx);
@@ -1295,6 +1300,9 @@ impl UseAgentToolbar {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
+            WarpifyFooterViewEvent::WarpifySsh(offer) => {
+                ctx.emit(UseAgentToolbarEvent::WarpifySsh(offer.clone()));
+            }
             WarpifyFooterViewEvent::Warpify => {
                 ctx.emit(UseAgentToolbarEvent::Warpify);
             }
@@ -1336,6 +1344,16 @@ impl UseAgentToolbar {
         self.warpify_footer_view.update(ctx, |view, ctx| {
             view.show(ctx);
         });
+        ctx.notify();
+    }
+
+    pub(in crate::terminal) fn show_ssh_warpify(
+        &mut self,
+        offer: SshWarpifyOffer,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.warpify_footer_view
+            .update(ctx, |view, ctx| view.show_ssh(offer, ctx));
         ctx.notify();
     }
 
@@ -1386,6 +1404,7 @@ pub enum UseAgentToolbarEvent {
     HideRichInput,
     /// User chose to warpify the subshell.
     Warpify,
+    WarpifySsh(SshWarpifyOffer),
     /// User chose to use the agent.
     UseAgent,
 }

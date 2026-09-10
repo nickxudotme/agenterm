@@ -86,13 +86,13 @@ impl DirectoryFetcher {
         session_context: &SessionContext,
         dir_path: &str,
     ) -> Vec<DirectoryItem> {
-        // Convert the directory path to TypedPathBuf, expanding ~ if needed
-        let expanded_path = shellexpand::tilde(dir_path).into_owned();
-        let typed_path = if expanded_path != dir_path {
-            TypedPathBuf::from(expanded_path)
-        } else {
-            TypedPathBuf::from(dir_path)
-        };
+        let typed_path = resolve_directory_path(dir_path, session_context.session.home_dir());
+        log::info!(
+            "Warpify cwd: stage=directory_chip session={:?} display_path={dir_path:?} home={:?} directory={:?}",
+            session_context.session.id(),
+            session_context.session.home_dir(),
+            typed_path.to_str()
+        );
 
         // Force re-read the directory from disk so the chip reflects its current contents rather
         // than serving the possibly-stale entry from the shared `SessionContext` cache.
@@ -197,6 +197,11 @@ impl GenericMenuItem for DirectoryItem {
     fn action_data(&self) -> String {
         self.name.clone()
     }
+}
+
+fn resolve_directory_path(dir_path: &str, home_dir: Option<&str>) -> TypedPathBuf {
+    // Display paths belong to the session, which may have a different HOME than the client.
+    TypedPathBuf::from(shellexpand::tilde_with_context(dir_path, || home_dir).into_owned())
 }
 
 /// Sort menu items: directories first, then text files, then other files, all alphabetically within their groups

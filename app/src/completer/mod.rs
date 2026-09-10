@@ -117,6 +117,12 @@ impl SessionContext {
                     .collect::<Vec<_>>()
             }
             SessionType::WarpifiedRemote { .. } => {
+                log::info!(
+                    "Warpify cwd: stage=remote_listing session={:?} cwd={:?} directory={:?}",
+                    self.session.id(),
+                    self.current_working_directory.to_str(),
+                    directory.to_str()
+                );
                 let env_vars = self
                     .session
                     .path()
@@ -153,7 +159,9 @@ impl SessionContext {
                         }
                         CommandExitStatus::Failure => {
                             log::warn!(
-                                "Remote directory listing failed: directory={directory:?} exit_code={:?} output_bytes={}",
+                                "Remote directory listing failed: session={:?} directory={:?} exit_code={:?} output_bytes={}",
+                                self.session.id(),
+                                directory.to_str(),
                                 command_output.exit_code,
                                 command_output.output().len()
                             );

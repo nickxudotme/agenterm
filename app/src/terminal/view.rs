@@ -202,7 +202,9 @@ use super::settings::AltScreenPaddingMode;
 use super::ssh::util::{InteractiveSshCommand, SshWarpifyCommand, parse_interactive_ssh_command};
 use super::warpify::WarpificationSource;
 use super::warpify::success_block::{WarpifySuccessBlock, WarpifySuccessBlockEvent};
-use super::warpify::trigger_state::{SshBlockState, WarpifyState};
+use super::warpify::trigger_state::{
+    SshBlockState, SshWarpifyEligibility, SshWarpifyOffer, WarpifyState,
+};
 use super::{CLIAgent, GridType, cli_agent, should_right_click_paste};
 #[cfg(any(test, feature = "integration_tests"))]
 use crate::ai::agent::UserQueryMode;
@@ -499,8 +501,6 @@ use crate::terminal::view::ssh_tmux_deprecation_banner::{
 };
 use crate::terminal::view::telemetry::PromptSuggestionFallbackReason;
 use crate::terminal::view::zero_state_block::TerminalViewZeroStateBlock;
-use crate::terminal::warpify::SubshellSource;
-use crate::terminal::warpify::render::render_subshell_separator;
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::waterfall_gap_element::WaterfallGapElement;
 use crate::terminal::writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
@@ -2349,10 +2349,6 @@ pub struct TerminalViewRenderContext {
     pub input_box_element_key: String,
     /// Unique view id for saving active cursor position.
     pub terminal_view_id: EntityId,
-    /// This map contains the IDs of sessions that were subshells as keys. Their corresponding
-    /// values are the command that spawned the subshell, which is needed to paint the "flag"
-    pub spawning_command_for_subshell_sessions: HashMap<SessionId, SubshellSource>,
-
     pub obfuscate_secrets: ObfuscateSecrets,
     pub hovered_secret: Option<SecretHandle>,
 
@@ -9997,6 +9993,8 @@ impl TerminalView {
         triggered_by_rc_file_snippet: bool,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.warpify_state
+            .mark_ssh_bootstrap_started(self.model.lock().active_block_id().clone());
         self.dismiss_warpify_banner(&RememberForWarpification::DoNotRememberSubshellCommand, ctx);
 
         // Record the active long-running block so we can hide it later once the remote
@@ -10141,6 +10139,7 @@ impl TerminalView {
         remember_command: &RememberForWarpification,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.warpify_state.consume_ssh_offer();
         {
             let mut model = self.model.lock();
             model.block_list_mut().set_active_block_banner(None);
@@ -13841,11 +13840,6 @@ impl TerminalView {
         ctx.dispatch_global_action("workspace:save_app", ());
 
         self.update_incompatible_configuration_banner(session.shell().plugins(), ctx);
-
-        if let Some(subshell_info) = session.subshell_info() {
-            self.warpify_state
-                .add_subshell_separator(subshell_info, self.model.clone(), ctx);
-        }
 
         self.is_login_shell_bootstrapped = true;
         self.hide_slow_bootstrap_banner(ctx);
@@ -19410,17 +19404,6 @@ impl TerminalView {
         self.model.lock().blocklist_has_been_cleared = true;
         ctx.emit(Event::BlockListCleared);
 
-        // If we're currently in a subshell, add another flag to indicate that because we just
-        // cleared the existing one.
-        if let Some(session) = self
-            .active_block_session_id()
-            .and_then(|id| self.sessions.as_ref(ctx).get(id))
-            && let Some(info) = session.subshell_info()
-        {
-            self.warpify_state
-                .add_subshell_separator(info, self.model.clone(), ctx);
-        }
-
         // When we clear the blocklist, the user can't see past AI exchanges anymore, so these conversations should no longer
         // appear active for the terminal view anymore.
         BlocklistAIHistoryModel::handle(ctx).update(ctx, |ai_history_model, ctx| {
@@ -24037,15 +24020,6 @@ impl TerminalView {
         session.launch_data().cloned()
     }
 
-    fn spawning_command_for_subshell_sessions(
-        &self,
-        app: &AppContext,
-    ) -> HashMap<SessionId, SubshellSource> {
-        self.sessions
-            .as_ref(app)
-            .spawning_command_for_subshell_sessions()
-    }
-
     fn is_waterfall_gap_mode(&self, model: &TerminalModel, app: &AppContext) -> bool {
         let input_mode = *InputModeSettings::as_ref(app).input_mode.value();
         self.viewport_state(model.block_list(), input_mode, app)
@@ -24087,8 +24061,6 @@ impl TerminalView {
             selected_blocks: self.selected_blocks.clone(),
             input_box_element_key: self.input.as_ref(app).save_position_id(),
             terminal_view_id: self.view_id,
-            spawning_command_for_subshell_sessions: self
-                .spawning_command_for_subshell_sessions(app),
             obfuscate_secrets: get_secret_obfuscation_mode(app),
             hovered_secret: self.hovered_secret,
             horizontal_clipped_scroll_state: self.horizontal_clipped_scroll_state.clone(),
@@ -24785,12 +24757,6 @@ impl TerminalView {
 
         let inline_banners = self.render_inline_banners(appearance, app, model);
 
-        let mut subshell_separators = HashMap::new();
-
-        for (id, command) in self.warpify_state.get_subshell_separators() {
-            subshell_separators.insert(*id, render_subshell_separator(command.clone(), appearance));
-        }
-
         // Currently, it is assumed that only the active block can have a block banner, which
         // implies that there can only be one at a time. This assumption can be relaxed once we
         // have an actual use case for that.
@@ -24915,7 +24881,7 @@ impl TerminalView {
                 },
             ),
             inline_banners,
-            subshell_separators,
+            HashMap::new(),
             HashMap::from_iter(
                 self.cli_subagent_views
                     .iter()
@@ -26520,7 +26486,58 @@ impl TerminalView {
                     },
                 );
             }
-            SshLoginStatus::ReadyToWarpify => {
+            SshLoginStatus::ReadyToWarpify { block_id } => {
+                log::info!("SSH Warpify: candidate received block={block_id:?}");
+                let Some(host) = self.warpify_state.get_pending_ssh_host() else {
+                    log::info!(
+                        "SSH Warpify: candidate rejected block={block_id:?} reason=missing-host"
+                    );
+                    return;
+                };
+                let Some(session_id) = self.active_block_session_id() else {
+                    log::info!(
+                        "SSH Warpify: candidate rejected block={block_id:?} reason=missing-session"
+                    );
+                    return;
+                };
+                if self.model.lock().active_block_id() != block_id {
+                    log::info!(
+                        "SSH Warpify: candidate rejected block={block_id:?} session={session_id:?} reason=stale-block"
+                    );
+                    return;
+                }
+                let offer = SshWarpifyOffer {
+                    block_id: block_id.clone(),
+                    session_id,
+                    host,
+                };
+                self.warpify_state.offer_ssh(offer.clone());
+                if let Some(reason) = self.ssh_warpify_rejection(&offer, ctx) {
+                    log::info!(
+                        "SSH Warpify: offer rejected block={block_id:?} session={session_id:?} reason={reason}"
+                    );
+                    return;
+                }
+                if FeatureFlag::WarpifyFooter.is_enabled() {
+                    self.use_agent_footer
+                        .update(ctx, |footer, ctx| footer.show_ssh_warpify(offer, ctx));
+                    self.maybe_show_use_agent_footer_in_blocklist(ctx);
+                } else {
+                    let keybinding = keybinding_name_to_keystroke("terminal:warpify_subshell", ctx);
+                    let mut banner = WarpifyBannerState::new(
+                        self.warpify_state
+                            .get_pending_ssh_command()
+                            .unwrap_or_default(),
+                        keybinding,
+                    );
+                    banner.ssh_offer = Some(offer);
+                    self.model
+                        .lock()
+                        .block_list_mut()
+                        .set_active_block_banner(Some(WithinBlockBanner::WarpifyBanner(banner)));
+                }
+                log::info!("SSH Warpify: offer shown block={block_id:?} session={session_id:?}");
+                ctx.notify();
                 // The tmux-based SSH warpification flow has been removed in favor of the
                 // remote-server SSH extension. If this user had previously opted into the tmux
                 // wrapper, show them a one-time deprecation notice on their next SSH session.
@@ -26531,6 +26548,55 @@ impl TerminalView {
                 }
             }
         }
+    }
+
+    fn ssh_warpify_rejection(
+        &self,
+        offer: &SshWarpifyOffer,
+        ctx: &AppContext,
+    ) -> Option<&'static str> {
+        let settings = WarpifySettings::as_ref(ctx);
+        let model = self.model.lock();
+        let block = model.block_list().active_block();
+        let eligibility = SshWarpifyEligibility {
+            running: model.is_ssh_block() && block.is_executing() && !model.is_alt_screen_active(),
+            prompt_detected: matches!(
+                crate::terminal::ssh::util::check_ssh_login_grid(block.output_grid()),
+                crate::terminal::ssh::util::SshLoginState::PromptDetected
+            ),
+            enabled: *settings.enable_ssh_warpification.value(),
+            denylisted: settings.is_ssh_host_denylisted(&offer.host),
+            agent: block.is_agent_monitoring() || block.agent_interaction_metadata().is_some(),
+            viewer: model.shared_session_status().is_viewer(),
+        };
+        self.warpify_state.reject_ssh_offer(
+            offer,
+            block.id(),
+            block.metadata().session_id(),
+            &eligibility,
+        )
+    }
+
+    fn trigger_offered_ssh_bootstrap(
+        &mut self,
+        offer: &SshWarpifyOffer,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(reason) = self.ssh_warpify_rejection(offer, ctx) {
+            log::info!(
+                "SSH Warpify: click rejected block={:?} session={:?} reason={reason}",
+                offer.block_id,
+                offer.session_id
+            );
+            return;
+        }
+        self.warpify_state.consume_ssh_offer();
+        log::info!(
+            "SSH Warpify: user accepted block={:?} session={:?}",
+            offer.block_id,
+            offer.session_id
+        );
+        self.trigger_subshell_bootstrap(None, false, ctx);
     }
 
     pub fn shell_indicator_type(&self) -> Option<ShellIndicatorType> {
@@ -27033,6 +27099,7 @@ impl TypedActionView for TerminalView {
             | UserInputSequence(_)
             | ControlSequence(_)
             | TriggerSubshellBootstrap
+            | TriggerSshBootstrap(_)
             | ShowSubshellBanner(_)
             | DismissWarpifyBanner(_)
             | OpenBlockListContextMenu
@@ -27519,7 +27586,17 @@ impl TypedActionView for TerminalView {
 
                 self.ask_ai(&AskAISource::Block(*block_index), ctx)
             }
-            TriggerSubshellBootstrap => self.trigger_subshell_bootstrap(None, false, ctx),
+            TriggerSubshellBootstrap => {
+                let is_ssh = self.model.lock().is_ssh_block();
+                if is_ssh {
+                    if let Some(offer) = self.warpify_state.ssh_offer().cloned() {
+                        self.trigger_offered_ssh_bootstrap(&offer, ctx);
+                    }
+                } else {
+                    self.trigger_subshell_bootstrap(None, false, ctx);
+                }
+            }
+            TriggerSshBootstrap(offer) => self.trigger_offered_ssh_bootstrap(offer, ctx),
             ShowSubshellBanner(command) => {
                 // Abort handle is no longer needed since we've waited the 1s already.
                 self.warpify_state.take_subshell_banner_abort_handle();
@@ -29545,3 +29622,7 @@ fn agent_view_back_button_label(
 #[cfg(test)]
 #[path = "view_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "view_ssh_warpify_tests.rs"]
+mod ssh_warpify_tests;

@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn directory_path_uses_session_home() {
+    for (display_path, expected) in [
+        ("~", "/remote-home"),
+        ("~/", "/remote-home/"),
+        ("~/batch", "/remote-home/batch"),
+        ("/absolute/path", "/absolute/path"),
+        ("relative/path", "relative/path"),
+        ("~another-user", "~another-user"),
+    ] {
+        assert_eq!(
+            resolve_directory_path(display_path, Some("/remote-home")).to_str(),
+            Some(expected),
+            "display path: {display_path}"
+        );
+    }
+}
+
+#[test]
+fn directory_path_without_session_home_does_not_use_client_home() {
+    for path in ["~", "~/batch", "/absolute/path"] {
+        assert_eq!(resolve_directory_path(path, None).to_str(), Some(path));
+    }
+}
+
 fn create_directory_item(name: &str, directory_type: DirectoryType) -> DirectoryItem {
     DirectoryItem {
         name: name.to_string(),

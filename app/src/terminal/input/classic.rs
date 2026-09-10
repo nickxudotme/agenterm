@@ -1,4 +1,3 @@
-use pathfinder_geometry::vector::vec2f;
 use settings::Setting;
 use warpui::elements::{
     Border, ChildAnchor, ChildView, Clipped, Container, DropTarget, Element, Empty, Flex,
@@ -7,7 +6,7 @@ use warpui::elements::{
 };
 use warpui::{AppContext, SingletonEntity};
 
-use super::{Input, SubshellRenderState, should_render_prompt_using_editor_decorator_elements};
+use super::{Input, should_render_prompt_using_editor_decorator_elements};
 use crate::ai::blocklist::InputType;
 use crate::appearance::Appearance;
 use crate::context_chips::spacing;
@@ -23,7 +22,6 @@ use crate::terminal::input::common::{
 use crate::terminal::input::{InputDropTargetData, get_input_box_top_border_width};
 use crate::terminal::settings::{SpacingMode, TerminalSettings};
 use crate::terminal::view::TerminalAction;
-use crate::terminal::warpify::render::{render_subshell_flag, render_subshell_flag_pole};
 
 impl Input {
     /// Renders the classic input. This is used when the user has 'Honor PS1' enabled in settings,
@@ -149,41 +147,6 @@ impl Input {
                 self.render_input_banner(appearance, app, input_mode, is_compact_mode)
         {
             column.add_child(banner);
-        }
-
-        let subshell_flag = self.get_subshell_flag_render_state(&model, is_compact_mode, app);
-
-        let should_extend_flag = subshell_flag.is_some();
-
-        if should_extend_flag {
-            let max_height = self.size_info(app).pane_height_px().as_f32();
-            stack.add_positioned_child(
-                render_subshell_flag_pole(max_height, theme.subshell_background()),
-                OffsetPositioning::offset_from_parent(
-                    vec2f(0.0, 0.0),
-                    ParentOffsetBounds::ParentBySize,
-                    ParentAnchor::TopLeft,
-                    ChildAnchor::TopLeft,
-                ),
-            );
-        }
-
-        if let Some(SubshellRenderState::Flag(command)) = subshell_flag {
-            let flag = render_subshell_flag(
-                command,
-                appearance.monospace_font_family(),
-                appearance.monospace_font_size(),
-                theme,
-            );
-            stack.add_positioned_child(
-                flag,
-                OffsetPositioning::offset_from_parent(
-                    vec2f(0.0, 0.0),
-                    ParentOffsetBounds::Unbounded,
-                    ParentAnchor::TopLeft,
-                    ChildAnchor::TopLeft,
-                ),
-            );
         }
 
         if !FeatureFlag::AgentView.is_enabled()

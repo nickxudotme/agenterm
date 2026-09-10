@@ -118,7 +118,8 @@ remote shell.
 The user observed the integrated UI after manual initialization, but background
 completion still fails. New diagnostics show the remote directory listing is
 given the preceding local macOS home path and exits with code 1. This is a
-cross-session context problem, not evidence that the target lacks `find`.
+context mismatch to investigate, not evidence that the target lacks `find`.
+Correlate session IDs before ruling out requests left over from an older session.
 
 Cancellation logs also explain a mismatched result: a consumer cancelled its
 request before the old remote result arrived. This is not yet proven to cause
@@ -147,6 +148,28 @@ completion and exit behavior in the actual app before adding automatic entry.
 
 ## Suggested next steps
 
+September 11 local work: a regression test reproduced
+cross-session prompt-cache contamination: an in-band prompt for session 202
+inherited cached session 101. Cache reuse now requires equal session IDs. The
+test also verifies recovery when a full remote prompt arrives. In-band tests
+(13), BlockList tests (48) and TerminalModel tests (51) passed; these suites
+overlap and are not additive. The first live retest still logged remote listing
+requests for the local home directory, so this guard has not resolved the runtime
+issue. New info-level `Warpify cwd:` diagnostics trace received prompt lifecycle
+decisions, cache selection, applied block/input metadata, OSC 7 updates and remote
+listing requests. They log session IDs and readable paths, not command bodies,
+environment payloads or command output. Remove or lower their verbosity after
+diagnosis. Automatic Warpification has not been added.
+
+The next live test confirmed remote `pwd` and Tab completion work. Precmd,
+Block and Input all retained the remote directory, while separate listing
+requests supplied the local home path. The directory-chip fetcher expands its
+display path with the client's HOME (`shellexpand::tilde`); this code exists in
+the initial repository commit, not just the investigation changes. A scoped fix
+now supplies the session HOME explicitly, with regression coverage for tilde,
+subdirectories, unchanged paths and missing session HOME. Live verification of
+the fix is still pending; this does not establish automatic SSH integration.
+
 1. Make SSH Warpify policy explicit in Agenterm: default off, per-host opt-in,
    remote-server extension hard-disabled.
 2. Design the desired recursive/nested Warpify protocol independently of the
@@ -155,3 +178,59 @@ completion and exit behavior in the actual app before adding automatic entry.
    for the local terminal, shell bootstrap, ANSI parser, and Warp blocks.
 4. Add the future external MCP server as a separate local-only subsystem; do
    not re-enable the upstream MCP client surface.
+
+## September 11 SSH entry implementation
+
+The directory-chip fix has now been observed in the running app: tilde expansion
+uses the remote session home, and the current process no longer logged the
+previous remote directory-listing failure. Separate background generator failures
+remain outside this scoped fix.
+
+Comparison with the clean local upstream checkout found the same RemoteCommand
+plain-SSH fallback and a ReadyToWarpify branch without an integration offer. This
+is evidence about that checkout, not every official released Warp version.
+
+The approved implementation restores a user-confirmed SSH offer at a recognizable
+prompt. Banner, footer and shortcut share block/session-bound checks and reuse the
+existing unknown-shell bootstrap. Merely detecting a prompt never writes PTY
+bytes. Authentication, stale offers, repeated clicks, disabled/denylisted hosts,
+agent/viewer sessions and alternate-screen commands are rejected. The user must
+confirm that the visible prompt belongs to the intended target; heuristics do not
+authenticate a nested SSH destination. No SSH configuration or remote RC changes
+were made, and the restricted bastion remains unsupported.
+
+A failing split-output regression also exposed a read-order defect: SSH prompt
+detection ran before grid finalization updated max_cursor_point. Detection now
+runs after finalization, preserving PTY sharing order. Tail classification is
+bounded and rejects truncated soft-wrapped authentication text conservatively.
+
+Code review findings have been resolved. Final targeted GUI-lib tests with
+no-default-features passed 149/149; repository formatting and diff checks passed.
+The normal GUI build, bundle and signature verification passed. Agenterm was
+restarted as PID 28789 with terminal::view INFO logs enabled alongside cwd traces.
+Full workspace tests/Clippy were not run for this uncommitted local handoff.
+The user verified the real 219 workflow and reported that Warpify behaves
+normally after clicking the confirmation. Logs show two independent SSH offers
+were shown and accepted; repeated candidates for the same Block were rejected as
+consumed, and the remote session consistently used /data/home/nickhaoxu for
+Precmd, Block, Input and directory-chip state. This completes the safe one-click
+entry scope. It deliberately still asks on every SSH connection. Unattended
+automatic integration remains unimplemented and must not be reported as complete.
+
+## September 11 final UI cleanup and validation
+
+The user confirmed the rebuilt 219 flow works. Agenterm no longer renders the
+subshell decoration layer: compact separators such as `>_ ssh`, non-compact
+subshell flags and stripes, and the classic input flagpole were removed. This is
+rendering-only; session metadata, SSH recognition and Warpify bootstrap behavior
+remain intact.
+
+The targeted SSH/Warpify regression set passed 6/6 after the cleanup, and the
+GUI app was rebuilt, signed and restarted as PID 69050 for the successful visual
+check. Repository formatting, the no-inline-test-module check, workspace Clippy,
+default-GUI Clippy and warp_completer Clippy all passed with warnings denied.
+Corepack was installed locally so the pinned Yarn 4.0.1 command-signatures build
+could run. An initial unsupported all-features Clippy attempt exposed a pre-existing
+feature-gated test incompatibility; `script/presubmit` explicitly does not use
+all-features. One additional equivalent condition simplification in root_view was
+required by the repository's current Clippy toolchain.

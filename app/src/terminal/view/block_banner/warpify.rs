@@ -11,6 +11,7 @@ use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use super::render_block_banner;
 use crate::appearance::Appearance;
 use crate::terminal::view::{RememberForWarpification, TerminalAction};
+use crate::terminal::warpify::trigger_state::SshWarpifyOffer;
 use crate::themes::theme::Fill;
 use crate::ui_components::blended_colors;
 
@@ -18,6 +19,7 @@ const CLOSE_BUTTON_DIAMETER: f32 = 20.0;
 const STANDARD_PADDING: f32 = 8.0;
 
 pub struct WarpifyBannerState {
+    pub ssh_offer: Option<SshWarpifyOffer>,
     /// The subshell command that triggered the banner.
     pub command: String,
     pub height: f32,
@@ -35,6 +37,7 @@ pub struct WarpifyBannerState {
 impl WarpifyBannerState {
     pub fn new(command: String, initialize_warpify_keybinding: Option<Keystroke>) -> Self {
         Self {
+            ssh_offer: None,
             command,
             height: 0.0,
             initialize_warpify_keybinding,
@@ -46,14 +49,28 @@ impl WarpifyBannerState {
     }
 
     pub fn title(&self) -> &str {
-        "Warpify subshell"
+        if self.ssh_offer.is_some() {
+            "Confirm target shell and Warpify SSH"
+        } else {
+            "Warpify subshell"
+        }
     }
 
     pub fn action(&self) -> TerminalAction {
-        TerminalAction::TriggerSubshellBootstrap
+        self.ssh_offer
+            .clone()
+            .map(TerminalAction::TriggerSshBootstrap)
+            .unwrap_or(TerminalAction::TriggerSubshellBootstrap)
     }
 
     fn remember_for_warpification(&self, should_remember: bool) -> RememberForWarpification {
+        if let Some(offer) = &self.ssh_offer {
+            return if should_remember {
+                RememberForWarpification::RememberSSHHost(offer.host.clone())
+            } else {
+                RememberForWarpification::DoNotRememberSSHHost
+            };
+        }
         if should_remember {
             RememberForWarpification::RememberSubshellCommand(self.command.to_owned())
         } else {

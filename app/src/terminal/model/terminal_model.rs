@@ -564,7 +564,7 @@ pub enum SshLoginNotificationState {
     Monitoring,
     /// Read all pty output but don't send another initial notification.
     SentInitialNotification,
-    /// The final notification has been sent. No need to monitor anymore.
+    /// A prompt candidate was sent. Resume notifications after output leaves the prompt.
     Completed,
 }
 
@@ -2433,6 +2433,7 @@ impl TerminalModel {
     /// has progressed past authentication/login. When login is complete, emit Event::DetectedEndOfSshLogin.
     pub fn start_notify_on_end_of_ssh_login(&mut self) {
         let id_of_ssh_block = self.active_block_id().clone();
+        log::info!("SSH Warpify: monitoring block={id_of_ssh_block:?}");
         self.notify_on_end_of_ssh_login = Some(SshLogin {
             block_id: id_of_ssh_block,
             notification_state: SshLoginNotificationState::Monitoring,
@@ -2444,18 +2445,8 @@ impl TerminalModel {
         self.notify_on_end_of_ssh_login = None;
     }
 
-    /// Emits the event [Event::DetectedEndOfSshLogin] if the last line of output in the
-    /// ssh session indicates login is complete. The check_type parameter specifies whether
-    /// this is the initial check or a confirmation check (i.e., a previous check has already
-    /// succeeded).
-    ///
-    /// Overall, the heuristic waits for the line "Last login:" to appear in a line of output,
-    /// indicating that login is complete. However, this isn't enough. Users might have a .hushlogin
-    /// that suppresses that output line, so we also have a backup check. When we receive
-    /// a line of output that is not a known SSH output, we consider that to be some mild evidence that
-    /// login is complete. Though, because that output line might be a false alarm (i.e., it could be
-    /// an SSH banner OR a line like "Permission denied."), we wait some amount of time and check again
-    /// before indicating we're ready for warpification.
+    /// Offers user-confirmed integration only at a recognizable prompt. Intermediate banners and
+    /// delayed checks retain observation until a prompt arrives; they never authorize integration.
     pub fn check_for_end_of_ssh_login(&mut self, confirmation_check: bool) {
         let Some(mut ssh_login_state) = self.notify_on_end_of_ssh_login.clone() else {
             return;
@@ -2467,21 +2458,31 @@ impl TerminalModel {
             return;
         }
 
-        // Only check for the end of ssh login if it wasn't already detected and notified.
+        let login_state = ssh::util::check_ssh_login_grid(active_block.output_grid());
         if ssh_login_state.notification_state == SshLoginNotificationState::Completed {
-            return;
+            if login_state == SshLoginState::PromptDetected {
+                return;
+            }
+            ssh_login_state.notification_state = SshLoginNotificationState::Monitoring;
         }
 
         let is_initial_check = !confirmation_check;
-        let block_output = active_block.output_to_string();
-        match ssh::util::check_ssh_login_state(&block_output) {
-            SshLoginState::LastLogin | SshLoginState::PromptDetected => {
+        match login_state {
+            SshLoginState::PromptDetected => {
+                log::info!(
+                    "SSH Warpify: prompt candidate block={:?}",
+                    ssh_login_state.block_id
+                );
                 self.event_proxy
-                    .send_app_event(Event::DetectedEndOfSshLogin(SshLoginStatus::ReadyToWarpify));
+                    .send_app_event(Event::DetectedEndOfSshLogin(
+                        SshLoginStatus::ReadyToWarpify {
+                            block_id: ssh_login_state.block_id.clone(),
+                        },
+                    ));
 
                 ssh_login_state.notification_state = SshLoginNotificationState::Completed;
             }
-            SshLoginState::NonSshOutput => {
+            SshLoginState::LastLogin | SshLoginState::NonSshOutput => {
                 // If we detect non-SSH output AND we haven't already notified, send a notification.
                 if is_initial_check {
                     if ssh_login_state.notification_state == SshLoginNotificationState::Monitoring {
@@ -2495,12 +2496,8 @@ impl TerminalModel {
                             SshLoginNotificationState::SentInitialNotification;
                     }
                 } else {
-                    self.event_proxy
-                        .send_app_event(Event::DetectedEndOfSshLogin(
-                            SshLoginStatus::ReadyToWarpify,
-                        ));
-
-                    ssh_login_state.notification_state = SshLoginNotificationState::Completed;
+                    // A banner or intermediate login is not a shell prompt. Keep watching output.
+                    ssh_login_state.notification_state = SshLoginNotificationState::Monitoring;
                 }
             }
             SshLoginState::Authenticating => {
@@ -2977,6 +2974,11 @@ impl ansi::Handler for TerminalModel {
     }
 
     fn set_current_working_directory(&mut self, path: String) {
+        log::info!(
+            "Warpify cwd: stage=osc7 session={:?} pwd={path:?} ignored_for_ssh={}",
+            self.block_list.active_block().session_id(),
+            self.is_ssh_block()
+        );
         // OSC 7 is honor-system: the parser only accepts payloads whose host
         // matches our local hostname, but a wrapper SSH session streams the
         // remote shell's bytes through this same Performer, so a remote box
@@ -3005,6 +3007,13 @@ impl ansi::Handler for TerminalModel {
             Some(data.completion_metadata.exit_code),
             data.prompt_metadata.session_id,
         );
+        log::info!(
+            "Warpify cwd: stage=precmd kind=completion session={:?} pwd={:?} in_band={} action={:?}",
+            data.prompt_metadata.session_id,
+            data.prompt_metadata.pwd,
+            data.prompt_metadata.was_sent_after_in_band_command(),
+            transition.action
+        );
         match transition.action {
             LifecycleAction::ApplyPrecmd => self.apply_precmd_to_fresh_block(data.prompt_metadata),
             LifecycleAction::ReconcileCompletionThenApplyPrecmd => {
@@ -3027,6 +3036,13 @@ impl ansi::Handler for TerminalModel {
             None,
             None,
             data.session_id,
+        );
+        log::info!(
+            "Warpify cwd: stage=precmd kind=prompt_only session={:?} pwd={:?} in_band={} action={:?}",
+            data.session_id,
+            data.pwd,
+            data.was_sent_after_in_band_command(),
+            transition.action
         );
         if matches!(transition.action, LifecycleAction::ApplyPrecmd) {
             self.apply_precmd_to_fresh_block(data);
@@ -3308,18 +3324,6 @@ impl ansi::Handler for TerminalModel {
     }
 
     fn on_finish_byte_processing(&mut self, input: &ansi::ProcessorInput<'_>) {
-        if let Some(SshLogin {
-            notification_state, ..
-        }) = &self.notify_on_end_of_ssh_login
-            && matches!(
-                notification_state,
-                SshLoginNotificationState::Monitoring
-                    | SshLoginNotificationState::SentInitialNotification
-            )
-        {
-            self.check_for_end_of_ssh_login(false);
-        }
-
         let bytes = input.bytes();
 
         // Send a copy of the bytes to subscribers.
@@ -3340,7 +3344,13 @@ impl ansi::Handler for TerminalModel {
             log::warn!("Failed to send OrderedTerminalEventType::PtyBytesRead: {e}");
         }
 
-        delegate!(self.on_finish_byte_processing(input))
+        delegate!(self.on_finish_byte_processing(input));
+
+        // Grid finalization updates max_cursor_point, which bounds the text read by SSH detection.
+        // Checking earlier can omit a prompt that arrived in this batch, especially after wrapping.
+        if self.notify_on_end_of_ssh_login.is_some() {
+            self.check_for_end_of_ssh_login(false);
+        }
     }
 
     fn on_reset_grid(&mut self) {
@@ -3714,3 +3724,7 @@ impl ModeProvider for TerminalModel {
 #[cfg(test)]
 #[path = "terminal_model_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "ssh_login_tests.rs"]
+mod ssh_login_tests;

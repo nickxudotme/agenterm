@@ -43,7 +43,6 @@ use crate::remote_server::manager::{RemoteServerManager, RemoteServerManagerEven
 use crate::server::telemetry::{BootstrappingInfo, TelemetryEvent};
 use crate::terminal::event::{ExecutedExecutorCommandEvent, RemoteServerSetupState};
 use crate::terminal::shell::{Shell, ShellType};
-use crate::terminal::warpify::SubshellSource;
 use crate::terminal::{History, ShellHost, ShellLaunchData};
 
 #[derive(thiserror::Error, Debug)]
@@ -495,25 +494,6 @@ impl Sessions {
     pub fn tracks_session(&self, session_id: SessionId) -> bool {
         self.sessions.contains_key(&session_id)
             || self.pending_session_start_times.contains_key(&session_id)
-    }
-
-    /// Returns a map of the spawning commands for all subshell sessions, keyed the session's `SessionId`.
-    pub fn spawning_command_for_subshell_sessions(&self) -> HashMap<SessionId, SubshellSource> {
-        self.sessions
-            .iter()
-            .filter_map(|(id, session)| {
-                session.subshell_info().as_ref().map(|info| {
-                    (
-                        *id,
-                        if let Some(env_var_collection_name) = &info.env_var_collection_name {
-                            SubshellSource::EnvVarCollection(env_var_collection_name.clone())
-                        } else {
-                            SubshellSource::Command(info.spawning_command.clone())
-                        },
-                    )
-                })
-            })
-            .collect()
     }
 
     /// Handles an [`ExecutedExecutorCommandEvent`] by forwarding the event to

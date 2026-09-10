@@ -1916,9 +1916,9 @@ impl RootView {
             workspace_setting,
         };
 
-        let auth_onboarding_state = if ChannelState::channel() == Channel::Oss {
-            AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
-        } else if auth_state.is_logged_in() {
+        let auth_onboarding_state = if ChannelState::channel() == Channel::Oss
+            || auth_state.is_logged_in()
+        {
             AuthOnboardingState::Terminal(workspace_args.create_workspace(ctx))
         } else {
             cfg_if! {

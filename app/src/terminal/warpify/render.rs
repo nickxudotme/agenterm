@@ -1,35 +1,20 @@
 use markdown_parser::{FormattedText, FormattedTextFragment, FormattedTextLine};
-use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
 use pathfinder_geometry::vector::Vector2F;
 use warp_core::ui::appearance::Appearance;
 use warp_core::ui::theme::{Fill, WarpTheme};
 use warpui::elements::{
     Align, ConstrainedBox, Container, CornerRadius, CrossAxisAlignment, Flex, FormattedTextElement,
-    HighlightedHyperlink, Icon, MouseStateHandle, ParentElement, Radius, Rect, Shrinkable, Stack,
-    Text,
+    HighlightedHyperlink, Icon, MouseStateHandle, ParentElement, Radius, Shrinkable, Text,
 };
-use warpui::fonts::{FamilyId, Properties, Weight};
+use warpui::fonts::{Properties, Weight};
 use warpui::ui_components::components::{UiComponent as _, UiComponentStyles};
 use warpui::{AppContext, Element, EventContext, PaintContext, SingletonEntity as _};
 
-use super::SubshellSource;
 use super::settings::WarpifySettings;
 use crate::ai::blocklist::inline_action::inline_action_icons;
 use crate::ui_components::blended_colors;
 
-/// The flag font size varies with the monospace font width, but if it gets too big it will start
-/// to overlap with the prompt grid. This should eventually be fixed by growing the block height to
-/// fit the flag, but for now we can limit the flag font size to this maximum value.
-pub const MAXIMUM_FLAG_FONT_SIZE: f32 = 13.;
-
-const SUBSHELL_FLAG_HORIZONTAL_PADDING: f32 = 8.;
-const SUBSHELL_FLAG_VERTICAL_PADDING: f32 = 1.;
-
-// TODO(liam): remove this once figuring out how to get theme color in layout()
-const WARP_DRIVE_ENV_VAR_COLLECTION_ICON_COLOR: u32 = 0xC464FFFF;
-const ICON_MARGIN: f32 = 4.;
-const TERMINAL_ICON: &str = "bundled/svg/terminal.svg";
 pub const HORIZONTAL_TEXT_MARGIN: f32 = 20.;
 pub const SSH_DOCS_URL: &str = "https://docs.warp.dev/terminal/warpify/ssh";
 pub const SUBSHELL_DOCS_URL: &str = "https://docs.warp.dev/terminal/warpify/subshells";
@@ -201,19 +186,8 @@ pub fn render_never_warpify_ssh_link(
     Some(Align::new(link).bottom_right().finish())
 }
 
-fn get_subshell_flag_info(subshell_source: &SubshellSource, theme: &WarpTheme) -> (String, Fill) {
-    match subshell_source {
-        SubshellSource::EnvVarCollection(environment_name) => (
-            environment_name.to_string(),
-            Fill::Solid(ColorU::from_u32(WARP_DRIVE_ENV_VAR_COLLECTION_ICON_COLOR)),
-        ),
-        SubshellSource::Command(command) => (command.to_string(), theme.subshell_background()),
-    }
-}
-
 /// A single solid color vertical bar positioned on the left-hand side of a blocklist element
-/// or the TextInput area, used to indicate being inside a context (like a subshell).
-/// Implementation should match `[render_subshell_flag_pole]`.
+/// used to indicate contextual state such as failures or AI context.
 pub fn draw_flag_pole(
     origin: Vector2F,
     height: f32,
@@ -223,85 +197,4 @@ pub fn draw_flag_pole(
     ctx.scene
         .draw_rect_with_hit_recording(RectF::new(origin, Vector2F::new(LEFT_STRIPE_WIDTH, height)))
         .with_background(fill.into());
-}
-
-/// A single solid color vertical bar positioned on the left-hand side of a blocklist element
-/// or the TextInput area, used to indicate being inside a context (like a subshell).
-/// Implementation should match `[draw_subshell_flag_pole]`.
-pub fn render_subshell_flag_pole(
-    max_height: f32,
-    fill: impl Into<warpui::elements::Fill>,
-) -> Box<dyn Element> {
-    ConstrainedBox::new(Rect::new().with_background(fill.into()).finish())
-        .with_width(LEFT_STRIPE_WIDTH)
-        .with_height(max_height)
-        .finish()
-}
-
-/// This function creates the Element for the subshell flag, which may be needed by the block list
-/// and the input editor.
-pub fn render_subshell_flag(
-    subshell_source: SubshellSource,
-    font_family: FamilyId,
-    font_size: f32,
-    theme: &WarpTheme,
-) -> Box<dyn Element> {
-    let (flag_name, background_color) = get_subshell_flag_info(&subshell_source, theme);
-    let container = Container::new(
-        Flex::row()
-            .with_children([
-                render_icon(font_size - 2., theme.foreground()),
-                Text::new_inline(flag_name, font_family, font_size - 2.)
-                    .with_color(theme.foreground().into())
-                    .finish(),
-            ])
-            .finish(),
-    )
-    .with_background(background_color)
-    .with_padding_left(SUBSHELL_FLAG_HORIZONTAL_PADDING)
-    .with_padding_right(SUBSHELL_FLAG_HORIZONTAL_PADDING)
-    .with_padding_top(SUBSHELL_FLAG_VERTICAL_PADDING)
-    .with_padding_bottom(SUBSHELL_FLAG_VERTICAL_PADDING)
-    .finish();
-    Stack::new().with_child(container).finish()
-}
-
-fn render_icon(font_size: f32, fill: Fill) -> Box<dyn Element> {
-    Container::new(
-        ConstrainedBox::new(Icon::new(TERMINAL_ICON, fill).finish())
-            .with_max_width(font_size)
-            .with_max_height(font_size)
-            .finish(),
-    )
-    .with_margin_right(ICON_MARGIN)
-    .finish()
-}
-
-/// Renders a separator above the first block of a subshell session. This is shown in compact mode
-/// instead of the subshell flag.
-pub fn render_subshell_separator(command: String, appearance: &Appearance) -> Box<dyn Element> {
-    Container::new(
-        Align::new(
-            Flex::row()
-                .with_children([
-                    render_icon(
-                        appearance.monospace_font_size() - 2.,
-                        appearance.theme().foreground(),
-                    ),
-                    Text::new_inline(
-                        command,
-                        appearance.monospace_font_family(),
-                        appearance.monospace_font_size(),
-                    )
-                    .finish(),
-                ])
-                .finish(),
-        )
-        .left()
-        .finish(),
-    )
-    .with_padding_left(SUBSHELL_FLAG_HORIZONTAL_PADDING)
-    .with_padding_right(SUBSHELL_FLAG_HORIZONTAL_PADDING)
-    .with_background(appearance.theme().subshell_background())
-    .finish()
 }

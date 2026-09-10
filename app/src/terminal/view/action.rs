@@ -284,6 +284,7 @@ pub enum TerminalAction {
     },
     /// Starts a subshell in the active session.
     TriggerSubshellBootstrap,
+    TriggerSshBootstrap(crate::terminal::warpify::trigger_state::SshWarpifyOffer),
     /// If the user says "no" to Warpification, possibly requesting not to be asked again
     DismissWarpifyBanner(RememberForWarpification),
     /// Triggers the banner asking to turn the running block into a subshell. The String is the
@@ -617,6 +618,7 @@ impl fmt::Debug for TerminalAction {
             OpenBlockListContextMenu => f.write_str("OpenBlockListContextMenu"),
             AskAIAssistant { block_index } => write!(f, "AskAIAssistant({block_index:?})"),
             TriggerSubshellBootstrap => f.write_str("TriggerSubshellBootstrap"),
+            TriggerSshBootstrap(_) => f.write_str("TriggerSshBootstrap"),
             DismissWarpifyBanner(remember) => write!(f, "DismissWarpifyBanner({remember:?})"),
             ShowSubshellBanner(_) => f.write_str("ShowSubshellBanner"),
             InsertMostRecentCommandCorrection => f.write_str("InsertMostRecentCommandCorrection"),

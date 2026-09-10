@@ -3,6 +3,8 @@ use std::path::Path;
 use lazy_static::lazy_static;
 use regex::Regex;
 
+use crate::terminal::model::blockgrid::BlockGrid;
+
 /// Converts a multiline bash or zsh script to one line by turning newlines into semicolons or
 /// deleting them, as appropriate.
 ///
@@ -28,6 +30,7 @@ pub fn convert_script_to_one_line(script: &str) -> String {
     script
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum SshLoginState {
     LastLogin,
     NonSshOutput,
@@ -35,22 +38,35 @@ pub enum SshLoginState {
     PromptDetected,
 }
 
-/// Reads the contents of the output grid to determine SSH login state. Returns [SshLoginState::LastLogin] if
-/// "Last login:" is detected in the output. Returns [SshLoginState::NonSshOutput] if certain keywords
-/// known to be a part of ssh login prompts are found in the current last line of command output. The
-/// "password" and "Password" are for password authentication. "passphrase" is intended to cover authentication
-/// by public key. And "yes/no" relates to trust-on-first-use prompts for host-based authentication.
+pub fn check_ssh_login_grid(grid: &BlockGrid) -> SshLoginState {
+    const MAX_ROWS: usize = 32;
+    let output = grid.contents_to_string(false, Some(MAX_ROWS));
+    let output = if grid.len().saturating_sub(1) > MAX_ROWS {
+        // The first retained row may continue an authentication line whose keyword was truncated.
+        // Only a hard line boundary makes the remaining text safe to classify independently.
+        let Some((_, complete_lines)) = output.split_once('\n') else {
+            return SshLoginState::Authenticating;
+        };
+        complete_lines
+    } else {
+        &output
+    };
+    check_ssh_login_state(output)
+}
+
+/// Classifies the last output line before considering historical login banners. A prompt is only
+/// evidence for offering user-confirmed integration, not proof of the final SSH destination.
 pub fn check_ssh_login_state(block_output: &str) -> SshLoginState {
     lazy_static! {
-        // Common final prompt characters followed by a space.
-        static ref PROMPT_REGEX: Regex = Regex::new(r"[$#%>❯│⟫»▶λ→] $").expect("invalid regex");
+        static ref PROMPT_REGEX: Regex = Regex::new(r"[$#%>❯│⟫»▶λ→] ?$").expect("invalid regex");
     };
 
     let mut last_line = None;
+    let mut saw_last_login = false;
 
     for line in block_output.lines() {
         if line.starts_with("Last login:") {
-            return SshLoginState::LastLogin;
+            saw_last_login = true;
         }
         // With an iterator, there's no way to know if it's the last element so
         // we overwrite last_line at each iteration.
@@ -65,12 +81,15 @@ pub fn check_ssh_login_state(block_output: &str) -> SshLoginState {
             || line.contains("Please type")
             || line.contains("'yes'")
             || line.contains("Confirm user presence")
+            || line.to_ascii_lowercase().contains("pin+token")
             || line.starts_with("Enter ")
             || line.starts_with("Allow ")
         {
             SshLoginState::Authenticating
         } else if PROMPT_REGEX.is_match(line) {
             SshLoginState::PromptDetected
+        } else if saw_last_login {
+            SshLoginState::LastLogin
         } else {
             SshLoginState::NonSshOutput
         }

@@ -49,7 +49,6 @@ use super::model::blocks::{RichContentItem, SelectionRange};
 use super::model::grid::grid_handler::Link;
 use super::model::image_map::StoredImageMetadata;
 use super::model::mouse::{MouseAction, MouseButton, MouseState};
-use super::model::session::SessionId;
 use super::model::terminal_model::{SelectedBlocks, WithinBlock, WithinModel};
 use super::shared_session::presence_manager::{
     MUTED_PARTICIPANT_COLOR, PresenceManager, text_selection_color,
@@ -59,7 +58,7 @@ use super::view::{
     BLOCK_BANNER_HEIGHT, BlocklistAIRenderContext, InlineBannerId, RichContentMetadata,
     SeparatorId, SharedSessionBanners, TerminalEditor, TerminalViewRenderContext,
 };
-use super::warpify::render::{draw_flag_pole, render_subshell_flag};
+use super::warpify::render::draw_flag_pole;
 use super::{HEIGHT_FUDGE_FACTOR_LINES, TerminalModel, heights_approx_eq};
 use crate::ai::blocklist::{ATTACH_AS_AGENT_MODE_CONTEXT_TEXT, ai_brand_color};
 use crate::ai_assistant::{AI_ASSISTANT_SVG_PATH, ASK_AI_ASSISTANT_TEXT};
@@ -86,7 +85,6 @@ use crate::terminal::model::selection::{SelectAction, SelectionPoint};
 use crate::terminal::model::terminal_model::BlockIndex;
 use crate::terminal::safe_mode_settings::get_secret_obfuscation_mode;
 use crate::terminal::view::TerminalAction;
-use crate::terminal::warpify::SubshellSource;
 use crate::terminal::{SizeInfo, grid_renderer, should_right_click_paste};
 use crate::themes::theme::{Fill, WarpTheme};
 use crate::ui_components::{self, icons as UIIcon};
@@ -606,9 +604,6 @@ pub struct BlockListElement {
     scroll_position: ScrollPosition,
     is_terminal_focused: bool,
     is_terminal_selecting: bool,
-    /// This map contains the IDs of sessions that were subshells as keys. Their corresponding
-    /// values are the command that spawned the subshell, which is needed to paint the "flag"
-    subshell_sessions: HashMap<SessionId, SubshellSource>,
     size: Option<Vector2F>,
     /// These are the bounds the UI framework paints in, which are NOT necessarily the same as the visible bounds of the blocklist element.
     /// If we have a horizontal scroll bar (see horizontal_clipped_scroll_state), the UI bounds can go beyond the actually visible bounds.
@@ -647,7 +642,6 @@ pub struct BlockListElement {
     /// flags.
     subshell_separators: HashMap<SeparatorId, Box<dyn Element>>,
     cli_subagent_views: HashMap<BlockId, Box<dyn Element>>,
-    subshell_separator_height: f32,
 
     selected_blocks: SelectedBlocks,
 
@@ -670,10 +664,6 @@ pub struct BlockListElement {
 
     /// All the items within the block list that are currently visible.
     visible_items: Option<Rc<Vec<VisibleItem>>>,
-
-    /// This map stores the subshell flag Element for each Block that needs one. This is the flag
-    /// that renders inside the block padding when spacing is not in compact mode.
-    subshell_flags: HashMap<BlockIndex, Box<dyn Element>>,
 
     /// The snackbar header for the block list - this is the fixed "header block"
     /// that shows up when we are partially scrolled through a block.
@@ -755,7 +745,6 @@ pub enum VisibleItem {
         block_index: BlockIndex,
         // The index of the item within the block list sum tree.
         index: TotalIndex,
-        subshell_session_id: Option<SessionId>,
     },
     RestoredBlockSeparator {
         index: TotalIndex,
@@ -911,8 +900,6 @@ impl BlockListElement {
             scroll_position: terminal_view_render_context.scroll_position,
             is_terminal_focused: terminal_view_render_context.is_terminal_focused,
             is_terminal_selecting: terminal_view_render_context.is_terminal_selecting,
-            subshell_sessions: terminal_view_render_context.spawning_command_for_subshell_sessions,
-            subshell_flags: HashMap::new(),
             size: None,
             bounds: None,
             origin: None,
@@ -926,7 +913,6 @@ impl BlockListElement {
             ui_builder: appearance.ui_builder().clone(),
             block_borders_enabled: terminal_spacing.block_borders_enabled,
             overflow_offset: terminal_spacing.overflow_offset,
-            subshell_separator_height: terminal_spacing.subshell_separator_height,
             hovered_block_index: None,
             overflow_menu_button: None,
             ask_ai_assistant_button: None,
@@ -3255,16 +3241,6 @@ impl Element for BlockListElement {
         // viewport iterator for layout.
         let viewport = create_viewport!(model.block_list());
 
-        // Collect all the necessary subshell flags here. Usually there will only be one in the
-        // viewport, but it's possible the user might start a subshell, exit, and start another
-        // one within the same viewport. They might also start a nested subshell.
-        let mut subshell_flags = HashMap::new();
-
-        // Keep track of whether the previous block in this loop was part of a subshell, and if so
-        // what was the session_id. We need this to determine if the current block needs to have a
-        // subshell flag on it.
-        let mut prev_block_subshell_session_id: Option<SessionId> = None;
-
         if let Some(banner) = &mut self.block_banner {
             banner.layout(constraint, ctx, app);
         }
@@ -3339,54 +3315,9 @@ impl Element for BlockListElement {
                 BlockHeightItem::Block(height) => {
                     if height.as_f64() > 0. {
                         let block_index = viewport_item.block_index.expect("block index defined");
-                        let mut subshell_session_id = None;
-
                         if let Some(block) = model.block_list().block_at(block_index) {
                             if !(block.honor_ps1() || block.is_background() || block.is_static()) {
                                 block_indices_with_label_elements.push(block_index);
-                            }
-
-                            // Check if the current block belongs to a subshell session. We'll add
-                            // a stripe during paint if it does.
-                            if let Some(session_id) = block.session_id() {
-                                if let Some(command) = self.subshell_sessions.get(&session_id) {
-                                    subshell_session_id = Some(session_id);
-
-                                    // Check if this block is the first in this viewport to belong
-                                    // to this subshell, and lay out a flag Element for it. Don't
-                                    // do this in compact mode though (in which case
-                                    // subshell_separator_height will be > 0), or
-                                    // if this is a background block.
-                                    if (prev_block_subshell_session_id.is_none()
-                                        || prev_block_subshell_session_id != Some(session_id))
-                                        && self.subshell_separator_height == 0.
-                                        && !block.is_background()
-                                    {
-                                        let command = if let SubshellSource::Command(cmd) = command
-                                        {
-                                            cmd.split_whitespace()
-                                                .next()
-                                                .map(|exec| {
-                                                    SubshellSource::Command(exec.to_owned())
-                                                })
-                                                .unwrap_or_else(|| command.clone())
-                                        } else {
-                                            command.clone()
-                                        };
-
-                                        let mut flag_element = render_subshell_flag(
-                                            command,
-                                            self.font_family,
-                                            self.font_size,
-                                            &self.warp_theme,
-                                        );
-                                        flag_element.layout(constraint, ctx, app);
-                                        subshell_flags.insert(block_index, flag_element);
-                                    }
-                                    prev_block_subshell_session_id = Some(session_id);
-                                } else {
-                                    prev_block_subshell_session_id = None;
-                                }
                             }
 
                             if let Some(cli_subagent_view) =
@@ -3413,7 +3344,6 @@ impl Element for BlockListElement {
                         visible_items.push(VisibleItem::Block {
                             block_index,
                             index: viewport_item.entry_index,
-                            subshell_session_id,
                         });
                         visible_block_indices.push(block_index);
                         visible_height_px += height.as_f64() * cell_size.y() as f64;
@@ -3568,7 +3498,6 @@ impl Element for BlockListElement {
 
         self.visible_blocks = Some(viewport_iter.visible_block_range());
         self.visible_items = Some(Rc::new(visible_items));
-        self.subshell_flags = subshell_flags;
         self.label_elements.clear();
         let elements = (self.label_elements_builder)(
             block_indices_with_label_elements.clone(),
@@ -3824,8 +3753,7 @@ impl Element for BlockListElement {
             .visible_items
             .as_ref()
             .expect("visible items should not be None");
-        let mut items_iter = items.iter().enumerate().peekable();
-        while let Some((visible_idx, block_entry)) = items_iter.next() {
+        for (visible_idx, block_entry) in items.iter().enumerate() {
             let mut snackbar_header = None;
             if visible_idx == 0 {
                 if let VisibleItem::Block { block_index, .. } = block_entry {
@@ -3846,11 +3774,7 @@ impl Element for BlockListElement {
                 }
             }
             match block_entry {
-                VisibleItem::Block {
-                    block_index,
-                    subshell_session_id,
-                    ..
-                } => {
+                VisibleItem::Block { block_index, .. } => {
                     let Some(block) = model.block_list().block_at(*block_index) else {
                         continue;
                     };
@@ -4016,51 +3940,6 @@ impl Element for BlockListElement {
                                 "Should show avatar for shared session participant at selected block but avatar element was not found"
                             )
                         }
-                    }
-
-                    // Check if this block is in a subshell. If it is, draw a gray stripe on the
-                    // left-hand side.
-                    if subshell_session_id.is_some() {
-                        draw_flag_pole(
-                            header_origin.min(grid_origin),
-                            block_pixel_height,
-                            self.warp_theme.subshell_background(),
-                            ctx,
-                        );
-                    }
-
-                    // This section draws the subshell flag at the start of the subshell
-                    if let Some(flag_element) = self.subshell_flags.get_mut(block_index) {
-                        // Drawing the flag at the header_origin will draw it at the top of the
-                        // block. However, we want the flag to be sticky once the top of the block
-                        // scrolls out of the viewport, hence we do `.max(origin)` to stick it.
-                        let mut flag_origin = header_origin.max(origin);
-
-                        // Once the flag scrolls to the final consecutive block in this subshell,
-                        // we want to stick the flag to the bottom of that block instead of
-                        // overlapping into the next block/banner/visible_item. This peeks the next
-                        // item to see if it is in the subshell too.
-                        if let Some((_, next_item)) = items_iter.peek() {
-                            match next_item {
-                                VisibleItem::Block {
-                                    subshell_session_id: next_id,
-                                    ..
-                                } if subshell_session_id == next_id => {}
-                                _ => {
-                                    // Adjust the flag origin to align with the bottom of this block
-                                    let max_y = grid_origin.y() + block_pixel_height
-                                        - flag_element
-                                            .size()
-                                            .expect("block must be laid out before paint")
-                                            .y();
-                                    if flag_origin.y() > max_y {
-                                        flag_origin.set_y(max_y);
-                                    }
-                                }
-                            }
-                        }
-
-                        flag_element.paint(flag_origin, ctx, app)
                     }
 
                     if let Some(banner) = block.block_banner() {

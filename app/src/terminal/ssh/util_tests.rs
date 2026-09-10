@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn nested_ssh_waits_for_final_prompt() {
+    for (output, expected) in [
+        ("authz success", SshLoginState::NonSshOutput),
+        ("Last login: today\nWelcome", SshLoginState::LastLogin),
+        (
+            "Last login: today\n(user@jump) Pin+Token: ",
+            SshLoginState::Authenticating,
+        ),
+        (
+            "Last login: today\nPassword: ",
+            SshLoginState::Authenticating,
+        ),
+        (
+            "Last login: today\nWelcome\nuser@target:~$ ",
+            SshLoginState::PromptDetected,
+        ),
+        (
+            "Last login: today\nWelcome\nuser@target:~$",
+            SshLoginState::PromptDetected,
+        ),
+        ("", SshLoginState::Authenticating),
+    ] {
+        assert_eq!(check_ssh_login_state(output), expected);
+    }
+}
+
+#[test]
 fn ssh_gcloud_ssh_parsing() {
     assert!(parse_interactive_ssh_command("gcloud").is_none());
     assert!(parse_interactive_ssh_command("gcloud compute").is_none());

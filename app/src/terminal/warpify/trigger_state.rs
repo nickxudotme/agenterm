@@ -1,40 +1,45 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use parking_lot::FairMutex;
-use warp_core::ui::appearance::Appearance;
 use warpui::r#async::SpawnedFutureHandle;
-use warpui::{EntityId, SingletonEntity as _, ViewContext, ViewHandle};
+use warpui::{EntityId, ViewContext, ViewHandle};
 
 use super::success_block::WarpifySuccessBlock;
+use crate::terminal::TerminalView;
 use crate::terminal::model::block::BlockId;
 use crate::terminal::model::session::SessionId;
-use crate::terminal::model::terminal_model::SubshellInitializationInfo;
-use crate::terminal::settings::TerminalSettings;
 use crate::terminal::shell::ShellType;
-use crate::terminal::{TerminalModel, TerminalView};
 
-/// A unique identifier for a subshell separator.
-pub type SeparatorId = usize;
-
-/// These are elements in the BlockList which are similar to inline banners but are smaller, and
-/// only meant to render in compact mode when their in-padding flag counterparts don't have enough
-/// space in the padding to render.
-#[derive(Default)]
-struct SubshellSeparatorState {
-    /// The ID for the next separator to be created.
-    next_separator_id: SeparatorId,
-
-    /// These are for rendering above the first block of a subshell session.
-    separators: HashMap<SeparatorId, String>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshWarpifyOffer {
+    pub block_id: BlockId,
+    pub session_id: SessionId,
+    pub host: String,
 }
 
-impl SubshellSeparatorState {
-    /// Returns the ID to assign to the next separator
-    fn next_separator_id(&mut self) -> SeparatorId {
-        let next_id = self.next_separator_id;
-        self.next_separator_id += 1;
-        next_id
+pub struct SshWarpifyEligibility {
+    pub running: bool,
+    pub prompt_detected: bool,
+    pub enabled: bool,
+    pub denylisted: bool,
+    pub agent: bool,
+    pub viewer: bool,
+}
+
+impl SshWarpifyEligibility {
+    pub fn rejection(&self) -> Option<&'static str> {
+        if !self.running {
+            Some("not-running")
+        } else if !self.prompt_detected {
+            Some("no-shell-prompt")
+        } else if !self.enabled {
+            Some("disabled")
+        } else if self.denylisted {
+            Some("denylisted")
+        } else if self.agent {
+            Some("agent")
+        } else if self.viewer {
+            Some("viewer")
+        } else {
+            None
+        }
     }
 }
 
@@ -102,17 +107,59 @@ struct WarpifyTriggerState {
 
 #[derive(Default)]
 pub struct WarpifyState {
+    ssh_offer: Option<SshWarpifyOffer>,
+    ssh_offer_consumed: bool,
+    ssh_started_block: Option<BlockId>,
     session_id: Option<SessionId>,
 
     pending_state: Option<WarpifyTriggerState>,
-    /// Stores the metadata needed to render any separators above the first block of a subshell.
-    subshell_separator_state: SubshellSeparatorState,
     /// A unique-enough ID that is used to validate that a timeout is still valid.
     timeout_id: u8,
 }
 
 impl WarpifyState {
+    pub fn offer_ssh(&mut self, offer: SshWarpifyOffer) {
+        if self.ssh_offer.as_ref() == Some(&offer) {
+            return;
+        }
+        self.ssh_offer = Some(offer);
+        self.ssh_offer_consumed = false;
+    }
+
+    pub fn ssh_offer(&self) -> Option<&SshWarpifyOffer> {
+        self.ssh_offer.as_ref()
+    }
+
+    pub fn reject_ssh_offer(
+        &self,
+        offer: &SshWarpifyOffer,
+        current_block: &BlockId,
+        current_session: Option<SessionId>,
+        eligibility: &SshWarpifyEligibility,
+    ) -> Option<&'static str> {
+        if self.ssh_offer.as_ref() != Some(offer)
+            || &offer.block_id != current_block
+            || Some(offer.session_id) != current_session
+        {
+            return Some("stale-source");
+        }
+        if self.ssh_offer_consumed || self.ssh_started_block.as_ref() == Some(current_block) {
+            return Some("consumed");
+        }
+        eligibility.rejection()
+    }
+
+    pub fn consume_ssh_offer(&mut self) {
+        self.ssh_offer_consumed = true;
+    }
+
+    pub fn mark_ssh_bootstrap_started(&mut self, block_id: BlockId) {
+        self.ssh_started_block = Some(block_id);
+        self.consume_ssh_offer();
+    }
+
     pub fn delete_state(&mut self) {
+        self.ssh_offer = None;
         self.pending_state.take();
     }
 
@@ -139,34 +186,6 @@ impl WarpifyState {
         self.pending_state
             .as_ref()
             .and_then(|state| state.shell_type)
-    }
-
-    pub fn add_subshell_separator(
-        &mut self,
-        subshell_info: &SubshellInitializationInfo,
-        terminal_model: Arc<FairMutex<TerminalModel>>,
-        ctx: &mut ViewContext<TerminalView>,
-    ) {
-        let Some(command) = subshell_info.spawning_command.split_whitespace().next() else {
-            return;
-        };
-        let separator_id = self.subshell_separator_state.next_separator_id();
-        let appearance = Appearance::as_ref(ctx);
-        let terminal_spacing =
-            TerminalSettings::as_ref(ctx).terminal_spacing(appearance.line_height_ratio(), ctx);
-        let height = terminal_spacing.subshell_separator_height;
-        self.subshell_separator_state
-            .separators
-            .insert(separator_id, command.to_owned());
-        terminal_model
-            .lock()
-            .block_list_mut()
-            .append_subshell_separator(separator_id, height);
-        ctx.notify();
-    }
-
-    pub fn get_subshell_separators(&self) -> &HashMap<SeparatorId, String> {
-        &self.subshell_separator_state.separators
     }
 
     pub fn add_subshell_banner_abort_handle(&mut self, spawned_future_handle: SpawnedFutureHandle) {
@@ -305,6 +324,7 @@ impl WarpifyState {
     }
 
     pub fn on_warpify_start(&mut self, active_session_id: Option<SessionId>) {
+        self.consume_ssh_offer();
         self.session_id = active_session_id;
     }
 
@@ -324,3 +344,7 @@ impl WarpifyState {
         None
     }
 }
+
+#[cfg(test)]
+#[path = "trigger_state_tests.rs"]
+mod tests;

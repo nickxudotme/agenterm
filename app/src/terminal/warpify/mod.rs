@@ -16,12 +16,6 @@ pub enum WarpificationSource {
     Subshell,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum SubshellSource {
-    Command(String),
-    EnvVarCollection(String),
-}
-
 /// This template is for the snippet that appears in the output grid for the success block if the
 /// subshell is local.
 fn get_subshell_bootstrap_success_block_path(shell_type: ShellType) -> Option<&'static str> {

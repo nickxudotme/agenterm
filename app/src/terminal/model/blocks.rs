@@ -3346,6 +3346,17 @@ impl BlockList {
     /// Applies normal prompt metadata to the active block and finalizes the previous block's
     /// deferred completion work.
     pub(super) fn apply_precmd_to_active(&mut self, data: PromptMetadata) {
+        let cached = self.last_populated_precmd_payload.as_ref();
+        log::info!(
+            "Warpify cwd: stage=cache session={:?} pwd={:?} in_band={} cached_session={:?} cached_pwd={:?} reuse={}",
+            data.session_id,
+            data.pwd,
+            data.was_sent_after_in_band_command(),
+            cached.and_then(|metadata| metadata.session_id),
+            cached.and_then(|metadata| metadata.pwd.as_deref()),
+            data.was_sent_after_in_band_command()
+                && cached.is_some_and(|metadata| metadata.session_id == data.session_id)
+        );
         let latest_block_finished_time = self.latest_block_finished_time.take();
         // We don't need to log this delay during the bootstrapping process, since these
         // are not blocks that the user has created. The delay here also can be very high
@@ -3370,13 +3381,23 @@ impl BlockList {
         // in-band command runs. Thus we send an unpopulated precmd payload for in-band commands to
         // make their execution as fast as possible.
         if data.was_sent_after_in_band_command() {
-            let mut prompt_metadata = self.last_populated_precmd_payload.clone().unwrap_or(data);
+            let mut prompt_metadata = self
+                .last_populated_precmd_payload
+                .as_ref()
+                .filter(|cached| cached.session_id == data.session_id)
+                .cloned()
+                .unwrap_or(data);
             prompt_metadata.is_after_in_band_command = true;
             self.active_block_mut().apply_precmd(prompt_metadata);
         } else {
             self.active_block_mut().apply_precmd(data.clone());
             self.last_populated_precmd_payload = Some(data);
         }
+        log::info!(
+            "Warpify cwd: stage=block session={:?} pwd={:?}",
+            self.active_block().session_id(),
+            self.active_block().pwd()
+        );
 
         // Depending on whether or not there's a background block active, the previous
         // completed block is at blocks.len - 2 or blocks.len - 3.

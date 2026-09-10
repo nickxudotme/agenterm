@@ -198,8 +198,8 @@ pub enum TerminalMode {
 pub enum SshLoginStatus {
     /// We have some evidence login is complete but should check again.
     RecheckBeforeWarpifying,
-    /// We have high confidence login is complete.
-    ReadyToWarpify,
+    /// The source block has a prompt suitable for offering user-confirmed integration.
+    ReadyToWarpify { block_id: BlockId },
 }
 
 #[derive(Clone, Debug)]

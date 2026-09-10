@@ -1,5 +1,6 @@
 use float_cmp::{approx_eq, assert_approx_eq};
 use parking_lot::FairMutex;
+use warp_core::SessionId;
 use warp_core::features::FeatureFlag;
 use warpui::App;
 use warpui::elements::DEFAULT_UI_LINE_HEIGHT_RATIO;
@@ -15,6 +16,45 @@ use crate::terminal::model::test_utils::TestBlockListBuilder;
 use crate::terminal::model::{TerminalModel, test_utils};
 use crate::terminal::view::{InlineBannerItem, InlineBannerType};
 use crate::terminal::{BlockListSettings, SizeUpdateReason};
+
+#[test]
+fn in_band_prompt_does_not_reuse_another_sessions_metadata() {
+    let mut blocks = TestBlockListBuilder::new().build();
+    blocks.apply_precmd_to_active(PromptMetadata {
+        session_id: Some(101),
+        pwd: Some("/local-home".to_owned()),
+        ..Default::default()
+    });
+    blocks.apply_precmd_to_active(PromptMetadata {
+        session_id: Some(202),
+        is_after_in_band_command: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        blocks.active_block().metadata().session_id(),
+        Some(SessionId::from(202))
+    );
+    assert_eq!(blocks.active_block().pwd(), None);
+
+    blocks.apply_precmd_to_active(PromptMetadata {
+        session_id: Some(202),
+        pwd: Some("/remote-home".to_owned()),
+        ..Default::default()
+    });
+    blocks.apply_precmd_to_active(PromptMetadata {
+        session_id: Some(202),
+        is_after_in_band_command: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        blocks.active_block().metadata().session_id(),
+        Some(SessionId::from(202))
+    );
+    assert_eq!(
+        blocks.active_block().pwd().map(String::as_str),
+        Some("/remote-home")
+    );
+}
 
 pub fn input_string(block_list: &mut BlockList, input: &str) {
     for c in input.chars() {
