@@ -61,6 +61,7 @@ uuid.workspace = true
 vec1.workspace = true
 version-compare.workspace = true
 vte.workspace = true
+zmodem2 = "0.7.2"
 warp_cli.workspace = true
 warp_completer.workspace = true
 warp_assets.workspace = true
