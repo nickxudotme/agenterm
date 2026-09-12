@@ -491,6 +491,7 @@ impl ZmodemSession {
         Ok(ZmodemSession::Download(Box::new(DownloadSession {
             receiver: Receiver::with_flow_control(0, true)?,
             current_name: String::new(),
+            finished: false,
         })))
     }
 
@@ -500,7 +501,16 @@ impl ZmodemSession {
             sender: Sender::new()?,
             files: files.into_iter().collect::<VecDeque<_>>(),
             current: None,
+            finished: false,
         })))
+    }
+
+    /// Whether the transfer has ended and the session should be dropped.
+    pub fn is_finished(&self) -> bool {
+        match self {
+            ZmodemSession::Download(session) => session.finished,
+            ZmodemSession::Upload(session) => session.finished,
+        }
     }
 
     pub fn role(&self) -> ZmodemRole {
@@ -597,6 +607,7 @@ pub struct DownloadSession {
     receiver: Receiver,
     /// Name advertised by the sender for the file in flight.
     current_name: String,
+    finished: bool,
 }
 
 impl DownloadSession {
@@ -659,6 +670,7 @@ impl DownloadSession {
                     }
                     if matches!(owned, OwnedEvent::SessionCompleted | OwnedEvent::Aborted) {
                         step.finished = true;
+                        self.finished = true;
                     }
                     step.events.push(owned);
                 }
@@ -682,6 +694,7 @@ pub struct UploadSession {
     sender: Sender,
     files: VecDeque<UploadFile>,
     current: Option<UploadFile>,
+    finished: bool,
 }
 
 impl UploadSession {
@@ -734,6 +747,7 @@ impl UploadSession {
                     }
                     if matches!(owned, OwnedEvent::SessionCompleted | OwnedEvent::Aborted) {
                         step.finished = true;
+                        self.finished = true;
                     }
                     step.events.push(owned);
                 }

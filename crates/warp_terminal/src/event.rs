@@ -164,4 +164,23 @@ pub enum Event {
         image_data: Vec<u8>,
         image_protocol: ImageProtocol,
     },
+    /// A remote `sz` started a ZMODEM download. The terminal has taken over the
+    /// PTY stream and will emit [`Event::ZmodemProgress`] until it finishes.
+    ZmodemDownloadStarted {
+        file_name: Option<String>,
+    },
+    /// Progress for the in-flight ZMODEM transfer.
+    ZmodemProgress {
+        file_name: String,
+        bytes_transferred: u64,
+        bytes_total: u64,
+    },
+    /// A file finished transferring.
+    ZmodemFileCompleted {
+        file_name: String,
+    },
+    /// The transfer ended; `error` is `None` on success.
+    ZmodemFinished {
+        error: Option<String>,
+    },
 }

@@ -16,11 +16,15 @@ use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
 
 use super::mio_channel::Receiver;
+use crate::event::Event as TerminalEvent;
 use crate::event::ExitReason;
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty;
 use crate::model::ansi;
 use crate::writeable_pty::Message;
+use crate::zmodem::{
+    DetectorOutcome, Frame, OwnedEvent, ZmodemDetector, ZmodemError, ZmodemSession, ZmodemStep,
+};
 
 /// The size of the buffer to read data into from the PTY.
 const READ_BUFFER_SIZE: usize = 0x4_0000;
@@ -46,6 +50,15 @@ pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
     pty: P,
     rx: Receiver<Message>,
     terminal: Arc<FairMutex<M>>,
+
+    /// Watches PTY output for the start of a ZMODEM transfer. Only consulted
+    /// while no transfer is active, so streaming output pays a scan, not a
+    /// protocol round trip.
+    zmodem_detector: ZmodemDetector,
+
+    /// The active ZMODEM transfer, once one has been detected. Bytes are routed
+    /// here instead of the ANSI parser until the transfer ends.
+    zmodem: Option<ZmodemSession>,
 
     /// The event listener is available to the PTY event loop
     /// to emit relevant events to subscribers. The ansi handler
@@ -140,6 +153,130 @@ enum ChannelResult {
     TerminateLoop { child_exited: bool },
 }
 
+/// Routes PTY output through the active ZMODEM transfer, if any.
+///
+/// Returns the bytes that should still be rendered by the terminal. During a
+/// transfer that is only whatever preceded the protocol frames; the protocol
+/// bytes themselves are consumed and answered on the PTY.
+///
+/// This is a free function so it never holds a borrow on the event loop across
+/// the terminal lock taken by `pty_read`.
+fn route_zmodem(
+    detector: &mut ZmodemDetector,
+    active: &mut Option<ZmodemSession>,
+    listener: &ChannelEventListener,
+    bytes: &[u8],
+    state: &mut State,
+) -> Vec<u8> {
+    if let Some(session) = active.as_mut() {
+        return finish_zmodem_step(session.submit_wire(bytes), active, detector, listener, state)
+            .unwrap_or_default();
+    }
+
+    match detector.push(bytes) {
+        DetectorOutcome::Render(renderable) => renderable,
+        DetectorOutcome::Started {
+            header,
+            render_before,
+            protocol,
+        } => {
+            // Only `sz` (which opens with ZRQINIT or ZFILE) starts a download
+            // automatically. A ZRINIT means the remote is running `rz` and is
+            // waiting for us to send, which only an explicit upload starts.
+            if !matches!(header.frame, Frame::Zrqinit | Frame::Zfile) {
+                return render_before;
+            }
+            match ZmodemSession::new_download() {
+                Ok(mut session) => {
+                    listener.send_terminal_event(TerminalEvent::ZmodemDownloadStarted {
+                        file_name: None,
+                    });
+                    let reply = session.submit_wire(&protocol);
+                    detector.reset();
+                    *active = Some(session);
+                    finish_zmodem_step(reply, active, detector, listener, state)
+                        .unwrap_or_else(|| render_before.clone())
+                }
+                Err(error) => {
+                    log::warn!("Failed to start ZMODEM download: {error}");
+                    detector.reset();
+                    // Fall back to rendering. The output is garbled, but the
+                    // terminal stays usable instead of swallowing bytes.
+                    let mut all = render_before;
+                    all.extend_from_slice(&protocol);
+                    all
+                }
+            }
+        }
+    }
+}
+
+/// Applies one protocol step: queues PTY replies, reports progress, and ends
+/// the transfer once it is done.
+fn finish_zmodem_step(
+    result: Result<ZmodemStep, ZmodemError>,
+    active: &mut Option<ZmodemSession>,
+    detector: &mut ZmodemDetector,
+    listener: &ChannelEventListener,
+    state: &mut State,
+) -> Option<Vec<u8>> {
+    let step = match result {
+        Ok(step) => step,
+        Err(error) => {
+            log::warn!("ZMODEM transfer failed: {error}");
+            end_zmodem(active, detector, listener, Some(error.to_string()));
+            return None;
+        }
+    };
+
+    if !step.to_pty.is_empty() {
+        state.write_list.push_back(Cow::Owned(step.to_pty.clone()));
+    }
+
+    for event in &step.events {
+        match event {
+            OwnedEvent::FileStarted { name, size } => {
+                listener.send_terminal_event(TerminalEvent::ZmodemProgress {
+                    file_name: name.clone(),
+                    bytes_transferred: 0,
+                    bytes_total: size.map(u64::from).unwrap_or(0),
+                });
+            }
+            OwnedEvent::FileCompleted => {
+                listener.send_terminal_event(TerminalEvent::ZmodemFileCompleted {
+                    file_name: String::new(),
+                });
+            }
+            OwnedEvent::SessionCompleted => {
+                end_zmodem(active, detector, listener, None);
+                return Some(Vec::new());
+            }
+            OwnedEvent::Aborted => {
+                end_zmodem(active, detector, listener, Some("Transfer cancelled".to_owned()));
+                return Some(Vec::new());
+            }
+        }
+    }
+
+    if step.finished {
+        end_zmodem(active, detector, listener, None);
+    }
+    Some(Vec::new())
+}
+
+/// Tears down the active transfer and hands the stream back to the parser.
+fn end_zmodem(
+    active: &mut Option<ZmodemSession>,
+    detector: &mut ZmodemDetector,
+    listener: &ChannelEventListener,
+    error: Option<String>,
+) {
+    *active = None;
+    detector.reset();
+    listener.send_terminal_event(TerminalEvent::ZmodemFinished { error });
+    listener.send_wakeup_event();
+}
+
 impl<P, M> EventLoop<P, M>
 where
     P: local_tty::EventedPty + Send + 'static,
@@ -157,6 +294,8 @@ where
             pty,
             rx,
             terminal,
+            zmodem_detector: ZmodemDetector::new(),
+            zmodem: None,
             event_listener,
         }
     }
@@ -237,6 +376,18 @@ where
                 },
             }
 
+            // A ZMODEM transfer owns the stream: protocol bytes must never
+            // reach the ANSI parser, or they render as garbage. Routing runs
+            // through a free function so it does not hold a borrow on `self`
+            // across the terminal lock below.
+            let renderable = route_zmodem(
+                &mut self.zmodem_detector,
+                &mut self.zmodem,
+                &self.event_listener,
+                &buf[..bytes_in_buffer],
+                state,
+            );
+
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.terminal.try_lock() {
@@ -254,7 +405,7 @@ where
             let mut terminal_response_sequences = Vec::new();
             state.parser.parse_bytes(
                 terminal.deref_mut(),
-                &buf[..bytes_in_buffer],
+                &renderable,
                 &mut terminal_response_sequences,
             );
             if !terminal_response_sequences.is_empty() {
