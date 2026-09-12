@@ -192,6 +192,31 @@ enum ChannelResult {
     TerminateLoop { child_exited: bool },
 }
 
+/// Appends a ZMODEM wire trace when `WARP_ZMODEM_TRACE` names a file.
+///
+/// Transfers only misbehave against a real peer, and the terminal owns the
+/// stream, so a capture of the actual bytes is the only way to tell a protocol
+/// fault from a terminal-discipline one. Off unless the variable is set.
+fn trace_zmodem(direction: &str, bytes: &[u8]) {
+    use std::io::Write as _;
+
+    let Some(path) = std::env::var_os("WARP_ZMODEM_TRACE") else {
+        return;
+    };
+    if bytes.is_empty() {
+        return;
+    }
+
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{direction} {} {}", bytes.len(), hex::encode(bytes));
+}
+
 /// Routes PTY output through the active ZMODEM transfer, if any.
 ///
 /// Returns the bytes that should still be rendered by the terminal. During a
@@ -211,7 +236,11 @@ fn route_zmodem(
     if let Some(session) = active.as_mut() {
         // Uploads read and answer their own file data, so forwarding PTY
         // output is all that is needed to advance either direction.
+        trace_zmodem("in", bytes);
         let step = session.submit_wire(bytes);
+        if let Ok(step) = step.as_ref() {
+            trace_zmodem("out", &step.to_pty);
+        }
         let role = session.role();
 
         // A session owns the stream, so a peer that goes silent must not cost
@@ -241,6 +270,8 @@ fn route_zmodem(
         return finish_zmodem_step(step, active, detector, status, role, listener, state)
             .unwrap_or_default();
     }
+
+    trace_zmodem("pty", bytes);
 
     match detector.push(bytes) {
         DetectorOutcome::Render(renderable) => renderable,
@@ -275,6 +306,7 @@ fn route_zmodem(
                     listener.send_terminal_event(TerminalEvent::ZmodemDownloadStarted {
                         file_name: None,
                     });
+                    trace_zmodem("detect", &protocol);
                     let reply = session.submit_wire(&protocol);
                     let role = session.role();
                     detector.reset();
@@ -613,6 +645,10 @@ where
         }
 
         log::info!("ZMODEM upload requested: {} readable file(s)", files.len());
+        trace_zmodem(
+            "upload-request",
+            format!("{} files", files.len()).as_bytes(),
+        );
 
         if files.is_empty() {
             self.event_listener
@@ -636,7 +672,10 @@ where
 
         // `rz` waits for the sender, so the handshake has to go out first.
         match session.begin_upload() {
-            Ok(bytes) if !bytes.is_empty() => state.write_list.push_back(Cow::Owned(bytes)),
+            Ok(bytes) if !bytes.is_empty() => {
+                trace_zmodem("upload-start", &bytes);
+                state.write_list.push_back(Cow::Owned(bytes));
+            }
             Ok(_) => {}
             Err(error) => {
                 log::warn!("Failed to begin ZMODEM upload handshake: {error}");
