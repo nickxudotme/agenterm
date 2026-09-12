@@ -29,7 +29,6 @@ use crate::server::ids::{ServerId, SyncId};
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::MockTeamClient;
 use crate::server::server_api::workspace::MockWorkspaceClient;
-use crate::server::sync_queue::SyncQueue;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::workspaces::team::{Team, TeamVisibility};
 use crate::workspaces::team_tester::TeamTesterStatus;
@@ -310,7 +309,6 @@ fn model_validation_reads_the_selected_team_catalog() {
         });
         app.add_singleton_model(CloudModel::mock);
         app.add_singleton_model(TeamTesterStatus::mock);
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(UpdateManager::mock);
         app.add_singleton_model(|_| TemplatableMCPServerManager::default());
         app.add_singleton_model(|ctx| {
@@ -358,7 +356,6 @@ fn update_feature_model_choices_clears_unavailable_flag_after_failed_fetch() {
         app.add_singleton_model(UserWorkspaces::default_mock);
         app.add_singleton_model(CloudModel::mock);
         app.add_singleton_model(TeamTesterStatus::mock);
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(UpdateManager::mock);
         app.add_singleton_model(|_| TemplatableMCPServerManager::default());
         app.add_singleton_model(|ctx| {

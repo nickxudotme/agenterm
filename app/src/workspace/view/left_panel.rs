@@ -25,6 +25,7 @@ use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent_conversations_model::AgentConversationsModel;
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
+use crate::channel::ChannelState;
 use crate::code::buffer_location::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use crate::code::file_tree::FileTreeEvent;
@@ -103,7 +104,11 @@ impl ToolPanelView {
                 ToolPanelAvailability::Available
             }
             ToolPanelView::WarpDrive => {
-                if WarpDriveSettings::is_warp_drive_available(app) {
+                // Agenterm's Drive is a local library: it never requires an account, unlike Zap
+                // and upstream which gate it on being logged in.
+                if ChannelState::is_local_warp_drive()
+                    || WarpDriveSettings::is_warp_drive_available(app)
+                {
                     ToolPanelAvailability::Available
                 } else {
                     ToolPanelAvailability::RequiresAccount
@@ -255,6 +260,10 @@ impl LeftPanelView {
         availability: ToolPanelAvailability,
     ) -> Box<dyn Element> {
         let (title, description) = match (view, availability) {
+            (ToolPanelView::WarpDrive, _) if ChannelState::is_local_warp_drive() => (
+                "Warp Drive unavailable",
+                "Restart Agenterm to reload local workflows.",
+            ),
             (ToolPanelView::WarpDrive, ToolPanelAvailability::RequiresAccount) => (
                 "Sign in to access Warp Drive",
                 "Create an account to save and share workflows, notebooks, prompts, and more.",

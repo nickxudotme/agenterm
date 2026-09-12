@@ -16,9 +16,8 @@ use crate::auth::AuthStateProvider;
 use crate::cloud_object::model::generic_string_model::StringModel;
 use crate::cloud_object::model::json_model::JsonModel;
 use crate::cloud_object::{
-    CloudObject, GenericStringObjectFormat, GenericStringObjectUniqueKey, JsonObjectType, Revision,
+    CloudObject, GenericStringObjectFormat, GenericStringObjectUniqueKey, JsonObjectType,
 };
-use crate::server::sync_queue::QueueItem;
 use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces};
 
 /// Oz web app page for viewing and creating cloud environments.
@@ -42,18 +41,6 @@ impl StringModel for AmbientAgentEnvironment {
 
     fn display_name(&self) -> String {
         self.name.clone()
-    }
-
-    fn update_object_queue_item(
-        &self,
-        revision_ts: Option<Revision>,
-        object: &CloudAmbientAgentEnvironment,
-    ) -> QueueItem {
-        QueueItem::UpdateCloudEnvironment {
-            model: object.model().clone().into(),
-            id: object.id,
-            revision: revision_ts.or(object.metadata.revision),
-        }
     }
 
     fn uniqueness_key(&self) -> Option<GenericStringObjectUniqueKey> {

@@ -49,7 +49,6 @@ use crate::search::files::model::FileSearchModel;
 use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::PrivacySettings;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
@@ -92,7 +91,6 @@ pub fn initialize_app_for_terminal_view(app: &mut App) {
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
     app.add_singleton_model(|_| Prompt::mock());
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(CloudEnvironmentCatalog::new);
     app.add_singleton_model(UserWorkspaces::default_mock);

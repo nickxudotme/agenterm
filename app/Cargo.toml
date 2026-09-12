@@ -32,22 +32,6 @@ name = "integration"
 path = "src/bin/integration.rs"
 test = false
 
-[[bin]]
-name = "stable"
-path = "src/bin/stable.rs"
-test = false
-
-[[bin]]
-name = "dev"
-path = "src/bin/dev.rs"
-test = false
-
-[[bin]]
-name = "preview"
-path = "src/bin/preview.rs"
-required-features = ["preview_channel"]
-test = false
-
 [dependencies]
 addr = "0.15.6"
 ai.workspace = true

@@ -24,6 +24,10 @@ use crate::ai::credit_availability::AICreditAvailability;
 use crate::ai::llms::{AvailableLLMs, MODELS_BY_FEATURE_CACHE_KEY, ModelsByFeature};
 use crate::ai::request_usage_model::AIRequestUsageModel;
 use crate::auth::{AuthStateProvider, UserUid};
+
+/// Stable owner id for Agenterm's account-free personal drive. Changing this value would orphan
+/// every locally saved Drive object.
+const LOCAL_PERSONAL_USER_UID: &str = "agenterm-local-user";
 use crate::channel::ChannelState;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObjectEventEntrypoint, ObjectType, Owner, Space};
@@ -697,13 +701,23 @@ impl UserWorkspaces {
         spaces
     }
 
-    // Returns the [`Owner`] for the user's personal drive. If the user is not authenticated, this
-    // returns `None`.
+    /// Owner of the local personal drive.
+    ///
+    /// Agenterm has no accounts, so the personal space is owned by a fixed local identity. This
+    /// must stay stable across restarts: it is persisted in each object's owner field, and a
+    /// different value would make previously saved objects invisible in the personal space.
+    fn local_personal_user_uid() -> UserUid {
+        UserUid::new(LOCAL_PERSONAL_USER_UID)
+    }
+
+    // Returns the [`Owner`] for the user's personal drive. Falls back to the local identity when
+    // no account is signed in, so the personal space stays usable offline.
     pub fn personal_drive(&self, ctx: &AppContext) -> Option<Owner> {
-        AuthStateProvider::as_ref(ctx)
+        let user_uid = AuthStateProvider::as_ref(ctx)
             .get()
             .user_id()
-            .map(|user_uid| Owner::User { user_uid })
+            .unwrap_or_else(Self::local_personal_user_uid);
+        Some(Owner::User { user_uid })
     }
 
     // Maps a [`Space`] into an [`Owner`], based on the user's team memberships. If the space
@@ -725,8 +739,10 @@ impl UserWorkspaces {
                     return Space::Personal;
                 }
 
+                // Objects created without an account carry the local identity, so treat it as
+                // the personal space too.
                 let current_user = AuthStateProvider::as_ref(ctx).get().user_id();
-                if Some(user_uid) == current_user {
+                if Some(user_uid) == current_user || user_uid == Self::local_personal_user_uid() {
                     Space::Personal
                 } else {
                     Space::Shared

@@ -13,7 +13,6 @@ use crate::drive::index::DriveIndexSection;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings_view::keybindings::KeybindingChangedNotifier;
 use crate::terminal::resizable_data::ResizableData;
@@ -30,7 +29,6 @@ fn initialize_app(app: &mut App) {
     app.add_singleton_model(UserWorkspaces::default_mock);
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| Appearance::mock());
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(|_| ResizableData::default());
     app.add_singleton_model(TeamTesterStatus::mock);
     app.add_singleton_model(UpdateManager::mock);
@@ -59,10 +57,9 @@ fn test_warp_drive_sections_with_no_team() {
 
         let index = panel.read(&app, |panel, _| panel.index_view.clone());
         index.read(&app, |index, _| {
+            // Agenterm's Drive only has the local personal space: no team onboarding sections.
             let sections = index.sections();
-            assert_eq!(sections.len(), 2);
-            assert_eq!(sections[0], DriveIndexSection::CreateATeam);
-            assert_eq!(sections[1], DriveIndexSection::Space(Space::Personal))
+            assert_eq!(sections, &vec![DriveIndexSection::Space(Space::Personal)])
         });
     })
 }

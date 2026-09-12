@@ -81,6 +81,15 @@ impl ChannelState {
         *CHANNEL_STATE.lock() = state;
     }
 
+    /// Overrides only the channel, keeping the rest of the state intact. Returns the previous
+    /// channel so callers can restore it.
+    pub fn set_channel(channel: Channel) -> Channel {
+        let mut state = CHANNEL_STATE.lock();
+        let previous = state.channel;
+        state.channel = channel;
+        previous
+    }
+
     pub fn is_release_bundle() -> bool {
         cfg!(feature = "release_bundle")
     }
@@ -327,6 +336,14 @@ impl ChannelState {
 
     pub fn channel() -> Channel {
         CHANNEL_STATE.lock().channel
+    }
+
+    /// Whether Warp Drive must behave as a local-only workflow library.
+    ///
+    /// Agenterm keeps this as an explicit predicate so local Warp Drive code has one place to
+    /// assert its no-account, no-cloud invariant instead of scattering channel comparisons.
+    pub fn is_local_warp_drive() -> bool {
+        matches!(Self::channel(), Channel::Oss)
     }
 
     #[cfg(feature = "test-util")]

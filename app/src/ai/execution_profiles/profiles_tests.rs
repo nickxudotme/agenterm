@@ -28,7 +28,6 @@ use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::{InitialLoadResponse, UpdateManager};
 use crate::server::ids::{ServerId, ServerIdAndType, SyncId};
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 use crate::settings::cloud_preferences::{CloudPreferenceModel, CloudPreferencesSettings};
 use crate::settings::{AISettings, AgentModeCommandExecutionPredicate, PrivacySettings};
 use crate::test_util::settings::initialize_settings_for_tests;
@@ -123,7 +122,6 @@ fn attacker_owned_shared_default_profile(cloud_uid: ServerId) -> ServerAIExecuti
 fn install_singletons(app: &mut App, auth_state: AuthStateProvider) {
     initialize_settings_for_tests(app);
     app.add_singleton_model(|_| auth_state);
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(TeamTesterStatus::mock);
     app.add_singleton_model(UpdateManager::mock);

@@ -19,7 +19,6 @@ use crate::appearance::Appearance;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::{CloudObject, Owner};
 use crate::server::ids::SyncId;
-use crate::server::sync_queue::SyncQueue;
 use crate::themes::theme::WarpTheme;
 use crate::workspaces::user_workspaces::UserWorkspaces;
 
@@ -88,7 +87,7 @@ impl ImportModal {
         let window_id = ctx.window_id();
         let import_body_id = self.import_modal.id();
 
-        let sync_queue_is_dequeueing = SyncQueue::as_ref(ctx).is_dequeueing();
+        let sync_queue_is_dequeueing = false;
 
         let allowed_file_types = vec![FileType::Yaml, FileType::Markdown];
 

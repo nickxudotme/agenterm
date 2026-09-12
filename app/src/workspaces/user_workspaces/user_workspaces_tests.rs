@@ -68,7 +68,6 @@ use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::ClientId;
 use crate::server::server_api::ServerApiProvider;
 use crate::server::server_api::team::{MockTeamClient, TeamClient};
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::{
     AISettings, AgentModeCommandExecutionPredicate, CodeSettings, FocusedTerminalInfo,
@@ -121,7 +120,6 @@ fn initialize_app_with_auth(
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
     app.add_singleton_model(TeamTesterStatus::new);
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(|ctx| {
         UserWorkspaces::mock(

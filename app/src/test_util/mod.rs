@@ -28,3 +28,26 @@ macro_rules! assert_eventually {
     }};
 }
 pub(crate) use assert_eventually;
+
+/// Restores the process-global channel when dropped.
+///
+/// `ChannelState` is a process-wide static, so tests that switch channels must restore it or they
+/// corrupt unrelated tests running in the same process.
+pub(crate) struct ChannelGuard {
+    previous: crate::channel::Channel,
+}
+
+impl ChannelGuard {
+    /// Switches to `channel` and returns a guard that restores the previous one.
+    pub(crate) fn new(channel: crate::channel::Channel) -> Self {
+        Self {
+            previous: crate::channel::ChannelState::set_channel(channel),
+        }
+    }
+}
+
+impl Drop for ChannelGuard {
+    fn drop(&mut self) {
+        crate::channel::ChannelState::set_channel(self.previous);
+    }
+}

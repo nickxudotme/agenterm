@@ -13,6 +13,7 @@ use cloud_object_client::{
 };
 pub use cloud_object_client::{GuestIdentifier, ObjectClient};
 use cloud_object_models::JsonSerializer;
+use cloud_objects::cloud_object::SerializedModel;
 use cynic::{MutationBuilder, QueryBuilder, SubscriptionBuilder};
 use warp_errors::report_error;
 use warp_graphql::error::UserFacingErrorInterface;
@@ -151,7 +152,6 @@ use crate::server::graphql::schema::{
 use crate::server::graphql::{get_request_context, get_user_facing_error_message};
 use crate::server::ids::{ClientId, HashableId, ServerId, ServerIdAndType, SyncId, ToServerId};
 use crate::server::server_api::ServerApi;
-use crate::server::sync_queue::SerializedModel;
 use crate::settings::Preference;
 use crate::workflows::WorkflowId;
 use crate::workflows::workflow_enum::WorkflowEnum;

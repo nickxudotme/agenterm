@@ -40,7 +40,6 @@ use crate::persistence::PersistenceWriter;
 use crate::server::experiments::ServerExperiments;
 use crate::server::ids::ServerId;
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 #[cfg(feature = "voice_input")]
 use crate::server::voice_transcriber::ServerVoiceTranscriber;
 use crate::settings::manager::SettingsManager;
@@ -349,7 +348,6 @@ pub fn register_tui_session_view_test_singletons(app: &mut warpui::App) {
         };
         UserWorkspaces::mock(team_client, workspace_client, vec![], ctx)
     });
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(CloudEnvironmentCatalog::new);
     app.add_singleton_model(|_| crate::appearance::Appearance::mock());

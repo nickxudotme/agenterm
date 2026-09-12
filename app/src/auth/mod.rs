@@ -44,7 +44,6 @@ use crate::notebooks::manager::NotebookManager;
 use crate::palette::PaletteMode;
 use crate::root_view::RootView;
 use crate::server::cloud_objects::update_manager::UpdateManager;
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::{PaletteSource, TelemetryEvent};
 use crate::session_management::{RunningSessionSummary, SessionNavigationData};
 use crate::settings::{
@@ -304,11 +303,6 @@ pub fn log_out(app: &mut AppContext) {
     CloudModel::handle(app).update(app, |cloud_model, _| {
         cloud_model.reset();
     });
-    // Clear the sync queue so that we don't try to sync the old user's objects to the new user.
-    SyncQueue::handle(app).update(app, |sync_queue, _| {
-        sync_queue.clear();
-    });
-
     // Stop the cloud object and workspace metadata polling loops that were started on login.
     UpdateManager::handle(app).update(app, |manager, _| {
         manager.stop_polling_for_updated_objects();

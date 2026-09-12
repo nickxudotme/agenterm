@@ -17633,6 +17633,9 @@ impl Workspace {
         }
     }
 
+    /// Routes local Warp Drive actions. Running only fills the active terminal's input; it never
+    /// creates a terminal implicitly and never executes on its own.
+
     fn handle_warp_drive_event(&mut self, event: &DrivePanelEvent, ctx: &mut ViewContext<Self>) {
         match event {
             DrivePanelEvent::RunWorkflow(workflow) => {
@@ -21093,7 +21096,8 @@ impl Workspace {
         appearance: &Appearance,
         ctx: &AppContext,
     ) -> Option<Box<dyn Element>> {
-        if ChannelState::channel() == Channel::Oss {
+        // Agenterm only surfaces the tools panel here; every other header item stays hidden.
+        if ChannelState::is_local_warp_drive() && *item != HeaderToolbarItemKind::ToolsPanel {
             return None;
         }
 
@@ -23555,6 +23559,17 @@ impl Workspace {
 
     /// Computes the list of available left panel views based on current AI settings and feature flags.
     fn compute_left_panel_views(ctx: &AppContext) -> Vec<ToolPanelView> {
+        // Agenterm's tool panel is a local workflow library, so Warp Drive is the only view and
+        // it must never be gated on an account.
+        if ChannelState::is_local_warp_drive() {
+            // Warp Drive is the only tool panel surface, but the user setting still controls
+            // whether it is offered at all.
+            if *WarpDriveSettings::as_ref(ctx).enable_warp_drive {
+                return vec![ToolPanelView::WarpDrive];
+            }
+            return vec![];
+        }
+
         let mut views = vec![];
         if cfg!(feature = "local_fs") && *CodeSettings::as_ref(ctx).show_project_explorer.value() {
             views.push(ToolPanelView::ProjectExplorer);

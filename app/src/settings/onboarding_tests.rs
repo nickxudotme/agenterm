@@ -18,7 +18,6 @@ use crate::drive::settings::WarpDriveSettings;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::ids::{ServerId, SyncId};
-use crate::server::sync_queue::SyncQueue;
 use crate::settings::{
     AISettings, CodeSettings, PrivacySettings, UsageDisplayUnit,
     apply_account_first_onboarding_settings, apply_onboarding_settings,
@@ -71,7 +70,6 @@ fn apply_onboarding_settings_preserves_existing_cloud_profile_on_existing_user_l
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(|_| NetworkStatus::new());
         app.add_singleton_model(TeamTesterStatus::mock);
         app.add_singleton_model(UpdateManager::mock);
@@ -188,7 +186,6 @@ fn account_first_settings_enable_agent_for_authenticated_users_and_apply_ui_choi
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(|_| NetworkStatus::new());
         app.add_singleton_model(TeamTesterStatus::mock);
         app.add_singleton_model(UpdateManager::mock);
@@ -252,7 +249,6 @@ fn apply_account_first_onboarding_settings_sets_dollars_for_new_accounts_only() 
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(|_| NetworkStatus::new());
         app.add_singleton_model(TeamTesterStatus::mock);
         app.add_singleton_model(UpdateManager::mock);
@@ -331,7 +327,6 @@ fn apply_onboarding_settings_gates_third_party_ai_on_account() {
     App::test((), |mut app| async move {
         initialize_settings_for_tests(&mut app);
         app.add_singleton_model(|_| AuthStateProvider::new_for_test());
-        app.add_singleton_model(SyncQueue::mock);
         app.add_singleton_model(|_| NetworkStatus::new());
         app.add_singleton_model(TeamTesterStatus::mock);
         app.add_singleton_model(UpdateManager::mock);

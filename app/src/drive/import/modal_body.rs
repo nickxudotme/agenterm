@@ -23,7 +23,6 @@ use super::queue::{ImportQueue, ImportQueueArgs, ImportQueueEvent, ParentId, Req
 use crate::appearance::Appearance;
 use crate::cloud_object::Owner;
 use crate::server::ids::{ClientId, SyncId};
-use crate::server::sync_queue::SyncQueue;
 use crate::ui_components::icons::Icon;
 use crate::view_components::DismissibleToast;
 use crate::workspace::ToastStack;
@@ -153,7 +152,7 @@ impl ImportModalBody {
                 }
             }
 
-            let sync_queue_dequeueing = SyncQueue::as_ref(ctx).is_dequeueing();
+            let sync_queue_dequeueing = false;
 
             if !sync_queue_dequeueing && state.all_files_saved_locally() {
                 ctx.emit(ImportModalBodyEvent::AllFileSavedLocally);
@@ -177,8 +176,8 @@ impl ImportModalBody {
 
     // Whether there is an active upload in progress (If all uploads are completed,
     // we don't consider the import modal upload to be in progress).
-    pub fn upload_in_progress(&self, app: &AppContext) -> bool {
-        let sync_queue_dequeueing = SyncQueue::as_ref(app).is_dequeueing();
+    pub fn upload_in_progress(&self, _app: &AppContext) -> bool {
+        let sync_queue_dequeueing = false;
 
         match &self.state {
             ImportState::Upload => false,
@@ -499,7 +498,7 @@ impl View for ImportModalBody {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        let sync_queue_dequeueing = SyncQueue::as_ref(app).is_dequeueing();
+        let sync_queue_dequeueing = false;
         let appearance = Appearance::as_ref(app);
 
         match &self.state {

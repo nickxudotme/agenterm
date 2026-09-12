@@ -42,6 +42,7 @@ use crate::ai::outline::RepoOutlines;
 use crate::ai::persisted_workspace::PersistedWorkspace;
 use crate::ai::restored_conversations::RestoredAgentConversations;
 use crate::ai::skills::SkillManager;
+use crate::channel::{Channel, ChannelState};
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::model::view::CloudViewModel;
 use crate::context_chips::prompt::Prompt;
@@ -59,7 +60,6 @@ use crate::server::cloud_objects::listener::Listener;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::experiments::ServerExperiments;
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::PrivacySettings;
 use crate::settings::cloud_preferences_syncer::CloudPreferencesSyncer;
@@ -75,6 +75,7 @@ use crate::terminal::local_tty::spawner::PtySpawner;
 use crate::terminal::shared_session::{
     SharedSessionScrollbackType, SharedSessionSource, SharedSessionStatus,
 };
+use crate::test_util::ChannelGuard;
 use crate::test_util::settings::initialize_settings_for_tests;
 use crate::undo_close::UndoCloseSettings;
 #[cfg(feature = "local_fs")]
@@ -90,6 +91,8 @@ use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::{
     AgentNotificationsModel, GlobalResourceHandlesProvider, ObjectActions, experiments, workspace,
 };
+/// Switches the process-wide channel for one test and restores the Agenterm channel on drop, so
+/// cloud-channel expectations never leak into other tests.
 pub(crate) fn initialize_app(app: &mut App) {
     initialize_settings_for_tests(app);
 
@@ -104,7 +107,6 @@ pub(crate) fn initialize_app(app: &mut App) {
     app.add_singleton_model(|_| NetworkStatus::new());
     app.add_singleton_model(|_| SystemStats::new());
     app.add_singleton_model(|_| crate::tab::TabShortcutModifierState::new());
-    app.add_singleton_model(SyncQueue::mock);
     app.add_singleton_model(CloudModel::mock);
     app.add_singleton_model(CloudEnvironmentCatalog::new);
     app.add_singleton_model(UserWorkspaces::default_mock);
@@ -551,6 +553,11 @@ fn test_theme_chooser_does_not_suppress_tab_bar_traffic_light_padding() {
 /// toggle.
 #[test]
 fn test_tools_panel_preferences_activate_after_signup_and_ai_enablement() {
+    // Covers the cloud channel's account gating; Agenterm keeps Drive available instead.
+    let _channel_guard = ChannelGuard::new(Channel::Stable);
+
+    // These cover the cloud channel's dynamic view strategy, not Agenterm's fixed one.
+
     let _skip_anon_guard = FeatureFlag::SkipFirebaseAnonymousUser.override_enabled(true);
     let _conversation_list_guard =
         FeatureFlag::AgentViewConversationListView.override_enabled(true);
@@ -5108,6 +5115,11 @@ fn test_pin_tab_on_grouped_tab_extracts_then_pins() {
 /// the tools panel with no way back).
 #[test]
 fn test_tools_panel_warp_drive_toggle_updates_available_views() {
+    // Covers the cloud channel's account gating; Agenterm keeps Drive available instead.
+    let _channel_guard = ChannelGuard::new(Channel::Stable);
+
+    // These cover the cloud channel's dynamic view strategy, not Agenterm's fixed one.
+
     // Force the non-anonymous path so `is_warp_drive_enabled` follows the
     // `enable_warp_drive` setting rather than the auth state.
     let _skip_anon_guard = FeatureFlag::SkipFirebaseAnonymousUser.override_enabled(false);
@@ -5470,4 +5482,86 @@ mod simplified_wasm_tab_bar {
         });
         });
     }
+}
+
+/// Agenterm's tool panel is a local workflow library: Warp Drive must be the only view and must
+/// stay available without an account, even when every other tool view would be hidden.
+#[test]
+fn test_agenterm_channel_only_exposes_local_warp_drive() {
+    App::test((), |mut app| async move {
+        // ChannelState is process-global and other fixtures switch it, so pin it for this test.
+        initialize_app(&mut app);
+
+        // Logged out: the local panel must still work without an account.
+        app.update(|ctx| {
+            WarpDriveSettings::handle(ctx).update(ctx, |settings, ctx| {
+                settings.enable_warp_drive.set_value(true, ctx).unwrap();
+            });
+            let auth_state = AuthStateProvider::as_ref(ctx).get();
+            auth_state.set_user(None);
+            auth_state.set_credentials(None);
+        });
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(ChannelState::channel(), Channel::Oss);
+            assert_eq!(
+                workspace.left_panel_views,
+                vec![ToolPanelView::WarpDrive],
+                "Agenterm must expose only the local Warp Drive panel"
+            );
+            workspace.left_panel_view.update(ctx, |left_panel, ctx| {
+                left_panel.handle_action_with_force_open(&LeftPanelAction::WarpDrive, false, ctx);
+                assert_eq!(
+                    left_panel.active_view_availability(ctx),
+                    left_panel::ToolPanelAvailability::Available,
+                    "local Warp Drive must never require an account"
+                );
+            });
+        });
+    });
+}
+
+/// Regression: clicking "new workflow" in Agenterm's Drive must open the editor even with no
+/// account. `open_workflow_modal` used to bail out because `personal_drive()` required an
+/// authenticated user, so the click silently did nothing.
+#[test]
+fn test_new_workflow_opens_without_account() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+
+        app.update(|ctx| {
+            let auth_state = AuthStateProvider::as_ref(ctx).get();
+            auth_state.set_user(None);
+            auth_state.set_credentials(None);
+        });
+
+        app.read(|ctx| {
+            assert!(
+                UserWorkspaces::as_ref(ctx).personal_drive(ctx).is_some(),
+                "the local personal drive must exist without an account"
+            );
+        });
+
+        let workspace = mock_workspace(&mut app);
+        workspace.update(&mut app, |workspace, ctx| {
+            assert!(
+                !workspace.current_workspace_state.is_workflow_modal_open,
+                "the modal starts closed"
+            );
+
+            workspace.handle_warp_drive_event(
+                &DrivePanelEvent::OpenWorkflowModalWithNew {
+                    space: Space::Personal,
+                    initial_folder_id: None,
+                },
+                ctx,
+            );
+
+            assert!(
+                workspace.current_workspace_state.is_workflow_modal_open,
+                "creating a workflow must open the editor without an account"
+            );
+        });
+    });
 }

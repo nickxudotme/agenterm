@@ -15,7 +15,6 @@ use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::network::NetworkStatus;
 use crate::persistence::ModelEvent;
 use crate::server::server_api::ServerApiProvider;
-use crate::server::sync_queue::SyncQueue;
 use crate::server::telemetry::context_provider::AppTelemetryContextProvider;
 use crate::settings::{PrivacySettings, WarpDrivePrivacySettings};
 use crate::workspaces::team_tester::TeamTesterStatus;
@@ -59,17 +58,12 @@ pub fn create_update_manager_struct(
 ) -> UpdateManagerStruct {
     let (sender, receiver) = sync_channel(CHANNEL_SIZE);
 
-    // the sync queue can't be mocked; needs to use the same server_api as the update_manager
-    app.add_singleton_model(|ctx| SyncQueue::new(Default::default(), server_api.clone(), ctx));
     let update_manager =
         app.add_singleton_model(|ctx| UpdateManager::new(Some(sender.clone()), server_api, ctx));
 
     app.add_singleton_model(|_| UserProfiles::new(Vec::new()));
 
     // set up the sync queue in a dequeueing state
-    SyncQueue::handle(app).update(app, |sync_queue, ctx| {
-        sync_queue.start_dequeueing(ctx);
-    });
 
     let cloud_model_events = app.update(|ctx| {
         let (tx, rx) = async_channel::unbounded();

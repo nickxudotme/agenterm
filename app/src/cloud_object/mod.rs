@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
+use cloud_objects::cloud_object::SerializedModel;
 use derivative::Derivative;
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -28,10 +29,8 @@ use crate::channel::ChannelState;
 use crate::drive::items::WarpDriveItem;
 use crate::drive::{CloudObjectTypeAndId, OpenWarpDriveObjectArgs, OpenWarpDriveObjectSettings};
 use crate::persistence::ModelEvent;
-use crate::server::cloud_objects::update_manager::InitiatedBy;
 use crate::server::ids::{HashableId, HashedSqliteId, ObjectUid, ServerId, SyncId, ToServerId};
 use crate::server::server_api::object::ObjectClient;
-use crate::server::sync_queue::{QueueItem, SerializedModel};
 use crate::util::time_format::format_approx_duration_from_now_utc;
 use crate::workflows::{CloudWorkflow, WorkflowSource};
 use crate::workspaces::user_profiles::UserProfiles;
@@ -136,20 +135,6 @@ pub trait CloudObject: Debug {
     /// Returns an optional UpdatedObjectInput to use during initial load, where
     /// the object's timestamps are sent to the server for comparison
     fn versions(&self, app: &AppContext) -> Option<UpdatedObjectInput>;
-
-    /// Returns an optional sync queue item of this object that would allow it to
-    /// created properly on the server. Returns None if it's already been created
-    /// server-side.
-    fn create_object_queue_item(
-        &self,
-        entrypoint: CloudObjectEventEntrypoint,
-        initiated_by: InitiatedBy,
-    ) -> Option<QueueItem>;
-
-    /// Returns a sync queue item of this object that would allow it to be updated
-    /// properly on the server.  Takes an optional revision_ts to set as the revision
-    /// in the sync queue item.
-    fn update_object_queue_item(&self, revision_ts: Option<Revision>) -> QueueItem;
 
     /// Returns whether this model type should render as a warp drive item.
     fn renders_in_warp_drive(&self) -> bool;
@@ -477,22 +462,6 @@ pub trait CloudModelType: Debug + Clone + Send + Sync {
     where
         Self: Sized;
 
-    /// Returns the sync queue item for creating this model on the server.
-    fn create_object_queue_item(
-        &self,
-        object: &Self::CloudObjectType,
-        entrypoint: CloudObjectEventEntrypoint,
-        initiated_by: InitiatedBy,
-    ) -> Option<QueueItem>;
-
-    /// Returns the sync queue item for updating this model on the server.
-    /// Takes an optional revision timestamp to set in the queue item.
-    fn update_object_queue_item(
-        &self,
-        revision_ts: Option<Revision>,
-        object: &Self::CloudObjectType,
-    ) -> QueueItem;
-
     /// Returns a serialized model.
     fn serialized(&self) -> SerializedModel;
 
@@ -759,19 +728,6 @@ where
             }
             _ => None,
         }
-    }
-
-    fn create_object_queue_item(
-        &self,
-        entrypoint: CloudObjectEventEntrypoint,
-        initiated_by: InitiatedBy,
-    ) -> Option<QueueItem> {
-        self.model()
-            .create_object_queue_item(self, entrypoint, initiated_by)
-    }
-
-    fn update_object_queue_item(&self, revision_ts: Option<Revision>) -> QueueItem {
-        self.model().update_object_queue_item(revision_ts, self)
     }
 
     fn renders_in_warp_drive(&self) -> bool {

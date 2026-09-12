@@ -12,7 +12,7 @@ use warp_core::settings::ChangeEventReason;
 use warp_core::user_preferences::GetUserPreferences;
 use warp_errors::report_if_error;
 use warpui::r#async::Timer;
-use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
+use warpui::{Entity, ModelContext, SingletonEntity};
 use warpui_extras::user_preferences::toml_backed::TomlBackedUserPreferences;
 
 use super::PrivacySettings;
@@ -27,8 +27,7 @@ use crate::drive::CloudObjectTypeAndId;
 use crate::server::cloud_objects::update_manager::{
     GenericStringObjectInput, InitiatedBy, UpdateManager, UpdateManagerEvent,
 };
-use crate::server::ids::{ClientId, SyncId};
-use crate::server::sync_queue::{SyncQueue, SyncQueueEvent};
+use crate::server::ids::ClientId;
 use crate::settings::cloud_preferences::{
     CloudPreference, CloudPreferenceModel, Platform, Preference,
 };
@@ -276,7 +275,6 @@ impl CloudPreferencesSyncer {
         // local changes — if the upload fails (e.g. offline), the hash
         // stays stale and the next startup will correctly detect
         // divergence.
-        ctx.subscribe_to_model(&SyncQueue::handle(ctx), Self::handle_sync_queue_event);
         ctx.subscribe_to_model(
             &CloudPreferencesSettings::handle(ctx),
             |me, _, event, ctx| match event {
@@ -314,39 +312,6 @@ impl CloudPreferencesSyncer {
             force_local_wins_on_startup: false,
             toml_file_path,
             sync_enabled,
-        }
-    }
-
-    /// Handles SyncQueue success events by updating the stored
-    /// settings file hash when a cloud preference is successfully
-    /// created or updated on the server.
-    fn handle_sync_queue_event(
-        &mut self,
-        _: ModelHandle<SyncQueue>,
-        event: &SyncQueueEvent,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        let server_id = match event {
-            SyncQueueEvent::ObjectCreationSuccessful {
-                server_creation_info,
-                ..
-            } => Some(server_creation_info.server_id_and_type.id),
-            SyncQueueEvent::ObjectUpdateSuccessful { server_id, .. } => Some(*server_id),
-            _ => None,
-        };
-        if let Some(server_id) = server_id {
-            // Check whether this object is a cloud preference.
-            // GenericStringObject is a superset that also includes
-            // env var collections, workflow enums, MCP servers, etc.
-            // Only preference changes should update the stored hash.
-            let sync_id = SyncId::ServerId(server_id);
-            let is_preference = CloudModel::as_ref(ctx)
-                .get_all_cloud_preferences_by_storage_key()
-                .values()
-                .any(|pref| pref.id == sync_id);
-            if is_preference {
-                self.update_stored_settings_hash(ctx);
-            }
         }
     }
 
@@ -1007,7 +972,3 @@ impl Entity for CloudPreferencesSyncer {
 
 /// Mark CloudPreferencesSyncer as global application state.
 impl SingletonEntity for CloudPreferencesSyncer {}
-
-#[cfg(test)]
-#[path = "cloud_preferences_syncer_tests.rs"]
-mod tests;

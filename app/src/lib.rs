@@ -267,7 +267,7 @@ use crate::antivirus::AntivirusInfo;
 use crate::app_state::AppState;
 use crate::autoupdate::{AutoupdateState, RelaunchModel};
 use crate::changelog_model::ChangelogModel;
-use crate::cloud_object::model::actions::{ObjectAction, ObjectActions};
+use crate::cloud_object::model::actions::ObjectActions;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::model::view::CloudViewModel;
 use crate::code::global_buffer_model::GlobalBufferModel;
@@ -297,7 +297,6 @@ use crate::server::experiments::ServerExperiments;
 #[cfg(not(target_family = "wasm"))]
 use crate::server::iap_identity_minter::ManagedSecretsIapMinter;
 use crate::server::server_api::managed_secrets::AppManagedSecretManager as ManagedSecretManager;
-use crate::server::sync_queue::{QueueItem, SyncQueue};
 pub use crate::server::telemetry::{
     AgentModeEntrypoint, AgentModeEntrypointSelectionType, TelemetryEvent,
 };
@@ -2154,17 +2153,7 @@ pub(crate) fn initialize_app(
         .cloned()
         .collect::<Vec<_>>();
 
-    let mut all_queue_items = Vec::new();
-    let objects_with_pending_changes = cloud_objects
-        .iter()
-        .filter(|object| object.metadata().has_pending_content_changes())
-        .cloned()
-        .collect::<Vec<_>>();
-    all_queue_items.extend(QueueItem::from_cached_objects(
-        objects_with_pending_changes.into_iter(),
-    ));
-
-    let cloud_model = ctx.add_singleton_model(|_ctx| {
+    let _cloud_model = ctx.add_singleton_model(|_ctx| {
         CloudModel::new(
             persistence_writer.sender(),
             cloud_objects,
@@ -2172,29 +2161,6 @@ pub(crate) fn initialize_app(
         )
     });
     ctx.add_singleton_model(ai::cloud_environments::CloudEnvironmentCatalog::new);
-
-    let unsynced_actions: Vec<(CloudObjectTypeAndId, ObjectAction)> = object_actions
-        .iter()
-        .filter(|action| action.is_pending())
-        .filter_map(|action| {
-            cloud_model.read(ctx, |model, _| {
-                let object = model.get_by_uid(&action.uid);
-                object.map(|o| (o.cloud_object_type_and_id(), action.clone()))
-            })
-        })
-        .collect::<Vec<_>>();
-
-    all_queue_items.extend(QueueItem::from_unsynced_actions(
-        unsynced_actions.into_iter(),
-    ));
-
-    ctx.add_singleton_model(|ctx| {
-        SyncQueue::new(
-            all_queue_items,
-            server_api_provider.as_ref(ctx).get_cloud_objects_client(),
-            ctx,
-        )
-    });
 
     // Seed the orchestration pin set from persisted conversation data
     // before the conversations vec is consumed by the singletons below.
