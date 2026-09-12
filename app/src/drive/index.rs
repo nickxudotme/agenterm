@@ -142,8 +142,6 @@ const DIALOG_OFFSET_PIXELS: f32 = -16.;
 const HOVER_PREVIEW_X_OFFSET: f32 = 4.;
 const HOVER_PREVIEW_Y_OFFSET: f32 = 0.;
 
-const LOADING_ICON_WIDTH: f32 = 16.;
-const LOADING_ICON_HEIGHT: f32 = 16.;
 const MENU_WIDTH: f32 = 194.;
 const CLOUD_OFFLINE_ICON_WIDTH: f32 = 20.;
 const CLOUD_OFFLINE_ICON_HEIGHT: f32 = 18.;
@@ -177,8 +175,6 @@ const ZERO_STATE_WORKFLOW_LABEL: &str = "Workflow";
 const ZERO_STATE_NOTEBOOK_LABEL: &str = "Notebook";
 
 const SORTING_BUTTON_TOOLTIP_LABEL: &str = "Sort by";
-
-const RETRY_BUTTON_TOOLTIP_LABEL: &str = "Retry sync";
 
 const SHARED_OBJECT_LIMIT_HIT_BANNER_LINE: &str =
     "Upgrade for access to more notebooks, workflows, shared sessions, and AI credits.";
@@ -479,9 +475,7 @@ pub enum DriveIndexEvent {
 
 #[derive(Clone, Default)]
 struct MouseStateHandles {
-    warp_drive_initial_load_mouse_state: MouseStateHandle,
     sorting_button_mouse_state: MouseStateHandle,
-    retry_button_mouse_state: MouseStateHandle,
     trash_row_mouse_state: MouseStateHandle,
     exit_trash_button_mouse_state: MouseStateHandle,
     shared_object_limit_hit_banner_button_mouse_state: MouseStateHandle,
@@ -564,7 +558,6 @@ pub struct DriveIndex {
     /// Drive item to represent collection of AI facts.
     /// Special-cased to always render at the top of the Personal space section.
     ai_fact_collection: WarpDriveAIFactCollection,
-    ai_fact_collection_item_mouse_states: ItemStates,
 
     /// Drive item to represent collection of MCP servers.
     /// Special-cased to always render at the top of the Personal space section.
@@ -847,15 +840,13 @@ impl DriveIndex {
                     .get_mut(&DriveIndexSection::Space(space))
                     && !section_state.collapsed
                 {
-                    // Add AI fact collection object + MCP server collection object for personal space
-                    if matches!(space, Space::Personal) {
-                        if FeatureFlag::McpServer.is_enabled()
-                            && ContextFlag::ShowMCPServers.is_enabled()
-                        {
-                            self.ordered_items
-                                .push(WarpDriveItemId::MCPServerCollection);
-                        }
-                        self.ordered_items.push(WarpDriveItemId::AIFactCollection);
+                    // Add the MCP server collection object for the personal space
+                    if matches!(space, Space::Personal)
+                        && FeatureFlag::McpServer.is_enabled()
+                        && ContextFlag::ShowMCPServers.is_enabled()
+                    {
+                        self.ordered_items
+                            .push(WarpDriveItemId::MCPServerCollection);
                     }
                     // Sort and add the rest of the items in the space
                     let Some(uids) = self
@@ -1041,7 +1032,6 @@ impl DriveIndex {
             should_show_personal_object_limit_status: true,
             workspace_dropdown,
             ai_fact_collection,
-            ai_fact_collection_item_mouse_states: Default::default(),
             mcp_server_collection,
             mcp_server_collection_item_mouse_states: Default::default(),
         }
@@ -1824,41 +1814,6 @@ impl DriveIndex {
         .finish()
     }
 
-    fn render_ai_fact_collection_item(
-        &self,
-        space: Space,
-        appearance: &Appearance,
-        app: &AppContext,
-    ) -> Option<Box<dyn Element>> {
-        let warp_drive_item_id = WarpDriveItemId::AIFactCollection;
-        let is_selected = self.selected == Some(warp_drive_item_id);
-        let mut is_focused = false;
-        if let Some(focused_index) = self.focused_index
-            && let Some(&WarpDriveItemId::AIFactCollection) = self.ordered_items.get(focused_index)
-        {
-            is_focused = true;
-        }
-
-        let row = WarpDriveRow::new(
-            Box::new(self.ai_fact_collection.clone()),
-            self.ai_fact_collection_item_mouse_states.clone(),
-            space,
-            0,
-            self.menu.clone(),
-            false, /* can_move */
-            !self.menu_items(&space, &warp_drive_item_id, app).is_empty(),
-            false,
-            false, /* share_dialog_open */
-            is_selected,
-            is_focused,
-            false, /* sync_queue_is_dequeueing */
-            tools_panel_menu_direction(app),
-            appearance,
-        )?;
-
-        Some(row.build().finish())
-    }
-
     fn render_mcp_server_collection_item(
         &self,
         space: Space,
@@ -2106,11 +2061,6 @@ impl DriveIndex {
                             {
                                 rendered_space.push(mcp_server_collection_item);
                             }
-                            if let Some(ai_fact_collection_item) =
-                                self.render_ai_fact_collection_item(space, appearance, app)
-                            {
-                                rendered_space.push(ai_fact_collection_item);
-                            }
                         }
 
                         rendered_space.extend(
@@ -2254,7 +2204,7 @@ impl DriveIndex {
             .finish()
     }
 
-    fn render_title(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+    fn render_title(&self, appearance: &Appearance, _app: &AppContext) -> Box<dyn Element> {
         let text = Container::new(
             appearance
                 .ui_builder()
@@ -2278,15 +2228,6 @@ impl DriveIndex {
             .with_main_axis_size(MainAxisSize::Max);
 
         let mut title_right_side = Flex::row();
-
-        if self.show_warp_drive_loading_icon && self.is_online(app) {
-            title_right_side.add_child(self.render_warp_drive_loading_icon(appearance));
-        }
-
-        // Only show the global retry button if there are errored objects
-        if self.num_errored_objects > 0 && self.is_online(app) {
-            title_right_side.add_child(self.render_retry_button(appearance));
-        }
 
         let search_button = icon_button(
             appearance,
@@ -2712,55 +2653,6 @@ impl DriveIndex {
         .finish()
     }
 
-    fn render_warp_drive_loading_icon(&self, appearance: &Appearance) -> Box<dyn warpui::Element> {
-        // Use same padding as icon_button (4px) to center the icon within ICON_DIMENSIONS
-        let icon_button_padding = (ICON_DIMENSIONS - LOADING_ICON_WIDTH) / 2.;
-        let loading_icon = Container::new(
-            ConstrainedBox::new(
-                Icon::Refresh
-                    .to_warpui_icon(
-                        appearance
-                            .theme()
-                            .sub_text_color(appearance.theme().surface_1()),
-                    )
-                    .finish(),
-            )
-            .with_width(LOADING_ICON_WIDTH)
-            .with_height(LOADING_ICON_HEIGHT)
-            .finish(),
-        )
-        .with_uniform_padding(icon_button_padding)
-        .with_margin_right(4.)
-        .finish();
-
-        let hoverable = Hoverable::new(
-            self.mouse_state_handles
-                .warp_drive_initial_load_mouse_state
-                .clone(),
-            |mouse_state| {
-                let mut stack = Stack::new().with_child(loading_icon);
-                if mouse_state.is_hovered() {
-                    let tooltip = appearance
-                        .ui_builder()
-                        .tool_tip(String::from("Syncing Warp Drive"));
-
-                    stack.add_positioned_overlay_child(
-                        tooltip.build().finish(),
-                        OffsetPositioning::offset_from_parent(
-                            vec2f(0., 4.),
-                            ParentOffsetBounds::Unbounded,
-                            ParentAnchor::BottomMiddle,
-                            ChildAnchor::TopMiddle,
-                        ),
-                    );
-                };
-                stack.finish()
-            },
-        );
-
-        hoverable.finish()
-    }
-
     fn render_sorting_button(&self, appearance: &Appearance) -> Box<dyn warpui::Element> {
         let mut button = icon_button_with_context_menu(
             Icon::Sort,
@@ -2797,28 +2689,6 @@ impl DriveIndex {
         );
 
         hoverable.finish()
-    }
-
-    fn render_retry_button(&self, appearance: &Appearance) -> Box<dyn warpui::Element> {
-        let ui_builder = appearance.ui_builder().clone();
-
-        icon_button(
-            appearance,
-            Icon::Refresh,
-            false,
-            self.mouse_state_handles.retry_button_mouse_state.clone(),
-        )
-        .with_tooltip(move || {
-            ui_builder
-                .tool_tip(RETRY_BUTTON_TOOLTIP_LABEL.to_string())
-                .build()
-                .finish()
-        })
-        .build()
-        .on_click(move |ctx, _, _| {
-            ctx.dispatch_typed_action(DriveIndexAction::RetryAllFailedObjects)
-        })
-        .finish()
     }
 
     fn render_create_new_button(
@@ -4887,6 +4757,11 @@ impl DriveIndex {
     #[cfg(test)]
     pub fn focused_index(&self) -> Option<usize> {
         self.focused_index
+    }
+
+    #[cfg(test)]
+    pub fn ordered_items(&self) -> &Vec<WarpDriveItemId> {
+        &self.ordered_items
     }
 }
 

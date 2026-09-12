@@ -10,6 +10,7 @@ use crate::cloud_object::Space;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::model::view::CloudViewModel;
 use crate::drive::index::{DriveIndexAction, DriveIndexSection};
+use crate::drive::items::WarpDriveItemId;
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
@@ -88,6 +89,28 @@ fn test_opening_drive_does_not_preselect_a_row() {
                 index.focused_index(),
                 Some(0),
                 "arrow down should enter the list at the first row"
+            );
+        });
+    })
+}
+
+/// The Drive is local-only, so cloud-sync affordances must be gone: no "Rules" row (it is an
+/// AI fact collection), and nothing that offers to sync or retry an upload.
+#[test]
+fn test_drive_has_no_cloud_sync_affordances() {
+    App::test(ASSETS, |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, panel) = app.add_window(WindowStyle::NotStealFocus, DrivePanel::new);
+        let index = panel.read(&app, |panel, _| panel.index_view.clone());
+
+        index.read(&app, |index, _| {
+            assert!(
+                !index
+                    .ordered_items()
+                    .contains(&WarpDriveItemId::AIFactCollection),
+                "the Rules row must not be listed, got {:?}",
+                index.ordered_items()
             );
         });
     })
