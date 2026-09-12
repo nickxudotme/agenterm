@@ -43,7 +43,7 @@ fn receive_with_sz(path: &Path) -> (Vec<u8>, String) {
 /// Same as [`receive_with_sz`], but caps how many bytes are handed to the
 /// session per call, mimicking a PTY that fragments the stream.
 fn receive_with_sz_chunked(path: &Path, max_chunk: usize) -> (Vec<u8>, String) {
-    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let pty = open_raw_pty();
 
     let mut child = Command::new("sz")
         .arg("--zmodem")
@@ -191,7 +191,7 @@ fn renders_progress_and_summary_for_a_real_transfer() {
 
     // Replays what the event loop renders: the advertised size arrives with
     // the file, and byte counts accumulate as subpackets land.
-    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let pty = open_raw_pty();
     let mut child = Command::new("sz")
         .arg("--zmodem")
         .arg("--binary")
@@ -290,6 +290,30 @@ fn write_all_blocking(pty: &mut File, mut bytes: &[u8]) {
     }
 }
 
+/// Opens a PTY in raw mode.
+///
+/// A default PTY is line-buffered, echoes what is written, and treats 0x11 and
+/// 0x13 as flow control. ZMODEM sends arbitrary binary, so echo feeds our own
+/// frames back as input and flow-control bytes are swallowed outright, which
+/// the receiver reports as a bad CRC. Real terminals put the line into raw
+/// mode before a transfer; tests driving a PTY directly must do the same.
+fn open_raw_pty() -> nix::pty::OpenptyResult {
+    use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags};
+
+    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let mut attrs = nix::sys::termios::tcgetattr(pty.slave).expect("tcgetattr");
+
+    attrs.input_flags = InputFlags::empty();
+    attrs.output_flags = OutputFlags::empty();
+    attrs.local_flags = LocalFlags::empty();
+    attrs.control_flags |= ControlFlags::CS8;
+
+    nix::sys::termios::tcsetattr(pty.slave, nix::sys::termios::SetArg::TCSANOW, &attrs)
+        .expect("tcsetattr");
+
+    pty
+}
+
 /// Whether `rz` is installed and usable.
 fn have_rz() -> bool {
     Command::new("rz")
@@ -300,22 +324,8 @@ fn have_rz() -> bool {
         .is_ok_and(|status| status.success() || status.code() == Some(1))
 }
 
-/// Upload against a real `rz` is close but not complete.
-///
-/// `rz` accepts our ZFILE, requests data, and the whole payload goes out in
-/// one frame. It then answers ZRPOS with offset zero instead of acknowledging
-/// the data, so the transfer restarts and the session never closes.
-///
-/// The remaining cause is the data frame's trailer: `zmodem2` ends the frame
-/// with ZCRCW (0x6b), which asks the receiver to respond before more data,
-/// while `sz` ends a streaming frame with ZCRCE (0x68) and follows it with
-/// ZEOF. Substituting our own ZFILE also changes the ZCONV terms the rest of
-/// the stream is interpreted under, so the frame trailer has to match.
-///
-/// Kept runnable rather than deleted so the remaining gap has a concrete
-/// failing case, with the evidence above already gathered.
+/// Sends a file to a real `rz` and verifies what lands on disk.
 #[test]
-#[ignore = "ZMODEM upload: rz rejects the data frame trailer and restarts"]
 fn sends_file_to_real_rz() {
     if !have_rz() {
         eprintln!("skipping: `rz` (lrzsz) is not installed");
@@ -331,7 +341,7 @@ fn sends_file_to_real_rz() {
     let dest_dir = dir.path().join("dest");
     std::fs::create_dir(&dest_dir).expect("create dest dir");
 
-    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let pty = open_raw_pty();
     let mut child = Command::new("rz")
         .arg("--binary")
         .current_dir(&dest_dir)
