@@ -642,20 +642,40 @@ impl DownloadSession {
         let mut consumed = 0usize;
         let mut sink = PtySink::new();
 
-        while consumed < bytes.len() {
-            let n = self.receiver.submit_wire(&bytes[consumed..])?;
-            if n == 0 {
+        // The receiver stops consuming input while it has work pending (bytes
+        // to send, data to persist, events to report). Draining between
+        // submissions is what unblocks it, so input and drain must interleave:
+        // consuming as much as possible up front and draining afterwards
+        // silently discards the tail of the buffer, which is where frames like
+        // ZEOF live.
+        loop {
+            let before = consumed;
+            if consumed < bytes.len() {
+                consumed += self.receiver.submit_wire(&bytes[consumed..])?;
+            }
+            let drained = self.drain(&mut step, &mut sink)?;
+
+            // Stop only when neither side can advance: no input was accepted
+            // and nothing was produced. Either alone is normal progress.
+            if consumed == before && !drained {
                 break;
             }
-            consumed += n;
         }
 
+        step.to_pty = sink.take();
+        Ok(step)
+    }
+
+    /// Drains every pending action, returning whether anything was produced.
+    fn drain(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
+        let mut progressed = false;
         loop {
             match self.receiver.poll() {
                 Action::WriteWire(to_write) => {
                     let len = to_write.len();
                     sink.write_all(to_write).expect("sink never errors");
                     self.receiver.wire_written(len);
+                    progressed = true;
                 }
                 Action::WriteFile(data) => {
                     let len = data.len();
@@ -667,6 +687,7 @@ impl DownloadSession {
                     chunk.name = self.current_name.clone();
                     chunk.data.extend_from_slice(data);
                     self.receiver.file_written(len)?;
+                    progressed = true;
                 }
                 Action::Event(event) => {
                     let owned = own_event(event);
@@ -678,15 +699,14 @@ impl DownloadSession {
                         self.finished = true;
                     }
                     step.events.push(owned);
+                    progressed = true;
                 }
                 // `Action` is `#[non_exhaustive]`; unknown variants cannot be
                 // handled meaningfully, so stop rather than spin.
                 _ => break,
             }
         }
-
-        step.to_pty = sink.take();
-        Ok(step)
+        Ok(progressed)
     }
 
     fn abort(&mut self) -> Vec<u8> {
