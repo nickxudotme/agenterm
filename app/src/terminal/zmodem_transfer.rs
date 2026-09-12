@@ -49,12 +49,7 @@ impl ZmodemTransfer {
     }
 
     /// Records progress for the file in flight, creating it if needed.
-    pub fn note_progress(
-        &mut self,
-        file_name: String,
-        _bytes_transferred: u64,
-        bytes_total: u64,
-    ) {
+    pub fn note_progress(&mut self, file_name: String, _bytes_transferred: u64, bytes_total: u64) {
         match self.pending.as_mut() {
             Some(pending) => {
                 if pending.name != file_name {
@@ -129,9 +124,7 @@ impl ZmodemTransfer {
                         log::warn!("Failed to write ZMODEM download: {error}");
                         ToastStack::handle(ctx).update(ctx, |stack, ctx| {
                             stack.add_ephemeral_toast(
-                                DismissibleToast::error(format!(
-                                    "Could not save {name}: {error}"
-                                )),
+                                DismissibleToast::error(format!("Could not save {name}: {error}")),
                                 window_id,
                                 ctx,
                             );

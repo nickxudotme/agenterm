@@ -652,13 +652,11 @@ impl DownloadSession {
                 }
                 Action::WriteFile(data) => {
                     let len = data.len();
-                    let chunk = step
-                        .file_data
-                        .get_or_insert_with(|| FileChunk {
-                            name: self.current_name.clone(),
-                            offset: 0,
-                            data: Vec::new(),
-                        });
+                    let chunk = step.file_data.get_or_insert_with(|| FileChunk {
+                        name: self.current_name.clone(),
+                        offset: 0,
+                        data: Vec::new(),
+                    });
                     chunk.name = self.current_name.clone();
                     chunk.data.extend_from_slice(data);
                     self.receiver.file_written(len)?;
@@ -767,10 +765,8 @@ impl UploadSession {
         let Some(file) = self.files.pop_front() else {
             return Ok(());
         };
-        self.sender.start_file(FileInfo::new(
-            &file.name,
-            Some(Position::new(file.size)),
-        ))?;
+        self.sender
+            .start_file(FileInfo::new(&file.name, Some(Position::new(file.size))))?;
         self.current = Some(file);
         Ok(())
     }
@@ -784,10 +780,7 @@ impl UploadSession {
 /// An owned protocol event, so sessions can outlive the borrow `poll` gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedEvent {
-    FileStarted {
-        name: String,
-        size: Option<u32>,
-    },
+    FileStarted { name: String, size: Option<u32> },
     FileCompleted,
     SessionCompleted,
     Aborted,

@@ -16,8 +16,7 @@ use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
 
 use super::mio_channel::Receiver;
-use crate::event::Event as TerminalEvent;
-use crate::event::ExitReason;
+use crate::event::{Event as TerminalEvent, ExitReason};
 use crate::event_listener::ChannelEventListener;
 use crate::local_tty;
 use crate::model::ansi;
@@ -169,8 +168,14 @@ fn route_zmodem(
     state: &mut State,
 ) -> Vec<u8> {
     if let Some(session) = active.as_mut() {
-        return finish_zmodem_step(session.submit_wire(bytes), active, detector, listener, state)
-            .unwrap_or_default();
+        return finish_zmodem_step(
+            session.submit_wire(bytes),
+            active,
+            detector,
+            listener,
+            state,
+        )
+        .unwrap_or_default();
     }
 
     match detector.push(bytes) {
@@ -261,7 +266,12 @@ fn finish_zmodem_step(
                 return Some(Vec::new());
             }
             OwnedEvent::Aborted => {
-                end_zmodem(active, detector, listener, Some("Transfer cancelled".to_owned()));
+                end_zmodem(
+                    active,
+                    detector,
+                    listener,
+                    Some("Transfer cancelled".to_owned()),
+                );
                 return Some(Vec::new());
             }
         }

@@ -289,9 +289,7 @@ impl ModelEventDispatcher {
                 bytes_transferred,
                 bytes_total,
             },
-            Event::ZmodemFileData { name, data } => {
-                ModelEvent::ZmodemFileData { name, data }
-            }
+            Event::ZmodemFileData { name, data } => ModelEvent::ZmodemFileData { name, data },
             Event::ZmodemFileCompleted { file_name } => {
                 ModelEvent::ZmodemFileCompleted { file_name }
             }

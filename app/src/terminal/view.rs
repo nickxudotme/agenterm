@@ -13073,11 +13073,7 @@ impl TerminalView {
                 bytes_total,
             } => {
                 ZmodemTransfer::handle(ctx).update(ctx, |transfer, _ctx| {
-                    transfer.note_progress(
-                        file_name.clone(),
-                        *bytes_transferred,
-                        *bytes_total,
-                    );
+                    transfer.note_progress(file_name.clone(), *bytes_transferred, *bytes_total);
                 });
             }
             ModelEvent::ZmodemFileData { name, data } => {

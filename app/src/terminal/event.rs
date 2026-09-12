@@ -213,9 +213,7 @@ impl From<warp_terminal::event::Event> for Event {
             warp_terminal::event::Event::ZmodemFileCompleted { file_name } => {
                 Self::ZmodemFileCompleted { file_name }
             }
-            warp_terminal::event::Event::ZmodemFinished { error } => {
-                Self::ZmodemFinished { error }
-            }
+            warp_terminal::event::Event::ZmodemFinished { error } => Self::ZmodemFinished { error },
         }
     }
 }

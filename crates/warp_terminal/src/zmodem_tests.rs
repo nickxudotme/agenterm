@@ -72,7 +72,10 @@ fn does_not_detect_unknown_encoding_byte() {
 fn detects_header_split_across_reads() {
     let mut detector = ZmodemDetector::new();
     // The split header must be held back rather than rendered as garbage.
-    assert_eq!(detector.push(b"rz\r**\x18B0000"), DetectorOutcome::Render(b"rz\r".to_vec()));
+    assert_eq!(
+        detector.push(b"rz\r**\x18B0000"),
+        DetectorOutcome::Render(b"rz\r".to_vec())
+    );
 
     let (header, render_before, _) = started(detector.push(b"0000000000\r\x8a\x11"));
     assert_eq!(header.frame, Frame::Zrqinit);
@@ -125,7 +128,10 @@ fn round_trips_generated_hex_header() {
 #[test]
 fn zrqinit_sequence_matches_expected_wire_bytes() {
     // `ZRQINIT` is frame 0 with all-zero flags; `lrzsz` emits exactly this.
-    assert_eq!(zrqinit_sequence(), REAL_SZ_PREAMBLE.strip_prefix(b"rz\r").unwrap());
+    assert_eq!(
+        zrqinit_sequence(),
+        REAL_SZ_PREAMBLE.strip_prefix(b"rz\r").unwrap()
+    );
 }
 
 #[test]
