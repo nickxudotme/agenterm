@@ -116,6 +116,8 @@ windows-result.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
+command.workspace = true
+libc.workspace = true
 serial_test = "0.8.0"
 tempfile.workspace = true
 unicode-segmentation = "1.11.0"
