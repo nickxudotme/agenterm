@@ -1497,6 +1497,7 @@ pub(crate) fn initialize_app(
 
     ctx.add_singleton_model(WarpConfig::new);
     ctx.add_singleton_model(|_ctx| SettingsManager::default());
+    ctx.add_singleton_model(|_ctx| crate::terminal::zmodem_transfer::ZmodemTransfer::new());
 
     let user_defaults_on_startup = settings::init(startup_toml_parse_error, ctx);
     timer.mark_interval_end("READ_USER_DEFAULTS_AND_INITIALIZE_SETTINGS");

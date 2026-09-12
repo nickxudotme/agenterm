@@ -229,6 +229,11 @@ fn route_zmodem(
             }
             match ZmodemSession::new_download() {
                 Ok(mut session) => {
+                    log::info!(
+                        "ZMODEM download detected: frame={:?} protocol_bytes={}",
+                        header.frame,
+                        protocol.len()
+                    );
                     listener.send_terminal_event(TerminalEvent::ZmodemDownloadStarted {
                         file_name: None,
                     });
@@ -271,7 +276,10 @@ fn finish_zmodem_step(
     };
 
     if !step.to_pty.is_empty() {
+        log::info!("ZMODEM queued {} reply bytes to the PTY", step.to_pty.len());
         state.write_list.push_back(Cow::Owned(step.to_pty.clone()));
+    } else if !step.events.is_empty() || step.file_data.is_some() {
+        log::info!("ZMODEM step produced no reply bytes");
     }
 
     if let Some(chunk) = &step.file_data
@@ -326,6 +334,7 @@ fn end_zmodem(
     listener: &ChannelEventListener,
     error: Option<String>,
 ) {
+    log::info!("ZMODEM transfer ended: error={error:?}");
     *active = None;
     detector.reset();
     listener.send_terminal_event(TerminalEvent::ZmodemFinished { error });
@@ -433,19 +442,6 @@ where
                 },
             }
 
-            // A ZMODEM transfer owns the stream: protocol bytes must never
-            // reach the ANSI parser, or they render as garbage. Routing runs
-            // through a free function so it does not hold a borrow on `self`
-            // across the terminal lock below.
-            let renderable = route_zmodem(
-                &mut self.zmodem_detector,
-                &mut self.zmodem,
-                &self.upload_contents,
-                &self.event_listener,
-                &buf[..bytes_in_buffer],
-                state,
-            );
-
             let terminal = match &mut terminal {
                 Some(terminal) => terminal,
                 None => terminal.insert(match self.terminal.try_lock() {
@@ -458,6 +454,21 @@ where
                     Some(terminal) => terminal,
                 }),
             };
+
+            // A ZMODEM transfer owns the stream: protocol bytes must never
+            // reach the ANSI parser, or they render as garbage.
+            //
+            // This runs only once the terminal lock is held, because the
+            // `continue` above retries with the same `bytes_in_buffer`; routing
+            // before it would feed the protocol the same bytes twice.
+            let renderable = route_zmodem(
+                &mut self.zmodem_detector,
+                &mut self.zmodem,
+                &self.upload_contents,
+                &self.event_listener,
+                &buf[..bytes_in_buffer],
+                state,
+            );
 
             // Process the bytes read into the buffer.
             let mut terminal_response_sequences = Vec::new();
