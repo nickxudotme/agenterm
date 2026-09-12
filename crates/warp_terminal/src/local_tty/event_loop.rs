@@ -229,6 +229,7 @@ fn route_zmodem(
     detector: &mut ZmodemDetector,
     active: &mut Option<ZmodemSession>,
     status: &mut ZmodemStatus,
+    flow_control: &mut dyn FnMut(bool),
     listener: &ChannelEventListener,
     bytes: &[u8],
     state: &mut State,
@@ -258,17 +259,33 @@ fn route_zmodem(
             .is_some_and(|at| at.elapsed() >= PROGRESS_STALL_TIMEOUT)
         {
             log::warn!("Abandoning stalled ZMODEM transfer; returning the terminal");
+            flow_control(true);
             let summary = status.progress.render_summary(role, Some("no response"));
             let mut abort = session.abort();
-            end_zmodem(active, detector, listener, Some("No response".to_owned()));
+            end_zmodem(
+                active,
+                detector,
+                flow_control,
+                listener,
+                Some("No response".to_owned()),
+            );
             // Tell the peer to stop, then render the outcome.
             state
                 .write_list
                 .push_back(Cow::Owned(std::mem::take(&mut abort)));
             return summary;
         }
-        return finish_zmodem_step(step, active, detector, status, role, listener, state)
-            .unwrap_or_default();
+        return finish_zmodem_step(
+            step,
+            active,
+            detector,
+            status,
+            flow_control,
+            role,
+            listener,
+            state,
+        )
+        .unwrap_or_default();
     }
 
     trace_zmodem("pty", bytes);
@@ -306,6 +323,8 @@ fn route_zmodem(
                     listener.send_terminal_event(TerminalEvent::ZmodemDownloadStarted {
                         file_name: None,
                     });
+                    // ZMODEM data contains 0x11/0x13; XON/XOFF would eat them.
+                    flow_control(false);
                     trace_zmodem("detect", &protocol);
                     let reply = session.submit_wire(&protocol);
                     let role = session.role();
@@ -317,9 +336,16 @@ fn route_zmodem(
                     *active = Some(session);
 
                     let mut rendered = render_before.clone();
-                    if let Some(line) =
-                        finish_zmodem_step(reply, active, detector, status, role, listener, state)
-                    {
+                    if let Some(line) = finish_zmodem_step(
+                        reply,
+                        active,
+                        detector,
+                        status,
+                        flow_control,
+                        role,
+                        listener,
+                        state,
+                    ) {
                         rendered.extend_from_slice(&line);
                     }
                     rendered
@@ -346,6 +372,7 @@ fn finish_zmodem_step(
     active: &mut Option<ZmodemSession>,
     detector: &mut ZmodemDetector,
     status: &mut ZmodemStatus,
+    flow_control: &mut dyn FnMut(bool),
     role: ZmodemRole,
     listener: &ChannelEventListener,
     state: &mut State,
@@ -357,7 +384,13 @@ fn finish_zmodem_step(
             let summary = status
                 .progress
                 .render_summary(role, Some(&error.to_string()));
-            end_zmodem(active, detector, listener, Some(error.to_string()));
+            end_zmodem(
+                active,
+                detector,
+                flow_control,
+                listener,
+                Some(error.to_string()),
+            );
             return Some(summary);
         }
     };
@@ -404,7 +437,7 @@ fn finish_zmodem_step(
                 });
             }
             OwnedEvent::SessionCompleted => {
-                end_zmodem(active, detector, listener, None);
+                end_zmodem(active, detector, flow_control, listener, None);
                 return Some(rendered);
             }
             OwnedEvent::Aborted => {
@@ -413,6 +446,7 @@ fn finish_zmodem_step(
                 end_zmodem(
                     active,
                     detector,
+                    flow_control,
                     listener,
                     Some("Transfer cancelled".to_owned()),
                 );
@@ -428,7 +462,7 @@ fn finish_zmodem_step(
     }
 
     if step.finished {
-        end_zmodem(active, detector, listener, None);
+        end_zmodem(active, detector, flow_control, listener, None);
     }
     Some(rendered)
 }
@@ -437,9 +471,12 @@ fn finish_zmodem_step(
 fn end_zmodem(
     active: &mut Option<ZmodemSession>,
     detector: &mut ZmodemDetector,
+    flow_control: &mut dyn FnMut(bool),
     listener: &ChannelEventListener,
     error: Option<String>,
 ) {
+    // Hand the line discipline back the way the shell expects it.
+    flow_control(true);
     log::info!("ZMODEM transfer ended: error={error:?}");
     *active = None;
     detector.reset();
@@ -567,10 +604,16 @@ where
             // This runs only once the terminal lock is held, because the
             // `continue` above retries with the same `bytes_in_buffer`; routing
             // before it would feed the protocol the same bytes twice.
+            let pty = &mut self.pty;
             let renderable = route_zmodem(
                 &mut self.zmodem_detector,
                 &mut self.zmodem,
                 &mut self.zmodem_status,
+                &mut |enabled| {
+                    if let Err(error) = pty.set_flow_control(enabled) {
+                        log::warn!("Failed to toggle flow control: {error}");
+                    }
+                },
                 &self.event_listener,
                 &buf[..bytes_in_buffer],
                 state,
@@ -683,6 +726,11 @@ where
             }
         }
 
+        // The upload path does not go through detection, so clear flow control
+        // here too: the data we are about to send contains 0x11 and 0x13.
+        if let Err(error) = self.pty.set_flow_control(false) {
+            log::warn!("Failed to disable flow control for upload: {error}");
+        }
         log::info!("ZMODEM upload session started");
         self.zmodem = Some(session);
         self.zmodem_detector.reset();

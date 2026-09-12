@@ -691,6 +691,20 @@ impl EventedReadWrite for Pty {
 }
 
 impl EventedPty for Pty {
+    fn set_flow_control(&mut self, enabled: bool) -> Result<()> {
+        let fd = self.fd.as_raw_fd();
+        let mut attrs =
+            termios::tcgetattr(fd).context("failed to read termios for flow control")?;
+        if attrs.input_flags.contains(InputFlags::IXON) == enabled {
+            return Ok(());
+        }
+        attrs.input_flags.set(InputFlags::IXON, enabled);
+        attrs.input_flags.set(InputFlags::IXOFF, enabled);
+        termios::tcsetattr(fd, SetArg::TCSANOW, &attrs)
+            .context("failed to apply termios for flow control")?;
+        Ok(())
+    }
+
     #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         self.signals.pending().next().and_then(|signal| {
