@@ -1,6 +1,6 @@
 use warp_core::ui::appearance::Appearance;
-use warpui::App;
 use warpui::platform::WindowStyle;
+use warpui::{App, TypedActionView};
 
 use super::DrivePanel;
 use crate::ai::blocklist::BlocklistAIHistoryModel;
@@ -9,7 +9,7 @@ use crate::auth::auth_manager::AuthManager;
 use crate::cloud_object::Space;
 use crate::cloud_object::model::persistence::CloudModel;
 use crate::cloud_object::model::view::CloudViewModel;
-use crate::drive::index::DriveIndexSection;
+use crate::drive::index::{DriveIndexAction, DriveIndexSection};
 use crate::network::NetworkStatus;
 use crate::server::cloud_objects::update_manager::UpdateManager;
 use crate::server::server_api::ServerApiProvider;
@@ -60,6 +60,35 @@ fn test_warp_drive_sections_with_no_team() {
             // Agenterm's Drive only has the local personal space: no team onboarding sections.
             let sections = index.sections();
             assert_eq!(sections, &vec![DriveIndexSection::Space(Space::Personal)])
+        });
+    })
+}
+
+/// Opening the Drive must not pre-select the personal space row: with team onboarding sections
+/// gone, index 0 is the space header, and highlighting it on open looks like a stray selection.
+/// Arrow keys still enter the list from the unfocused state.
+#[test]
+fn test_opening_drive_does_not_preselect_a_row() {
+    App::test(ASSETS, |mut app| async move {
+        initialize_app(&mut app);
+
+        let (_, panel) = app.add_window(WindowStyle::NotStealFocus, DrivePanel::new);
+        let index = panel.read(&app, |panel, _| panel.index_view.clone());
+
+        index.update(&mut app, |index, ctx| {
+            index.reset_focused_index_in_warp_drive(false, ctx);
+            assert_eq!(
+                index.focused_index(),
+                None,
+                "opening the Drive should leave no row highlighted"
+            );
+
+            index.handle_action(&DriveIndexAction::FocusNextItem, ctx);
+            assert_eq!(
+                index.focused_index(),
+                Some(0),
+                "arrow down should enter the list at the first row"
+            );
         });
     })
 }

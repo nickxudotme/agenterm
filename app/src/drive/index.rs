@@ -1109,7 +1109,9 @@ impl DriveIndex {
             self.initialize_section_states(ctx);
             self.set_focused_item(id, should_scroll, ctx);
         } else {
-            self.set_focused_index(Some(0), should_scroll, ctx);
+            // Nothing is open, so start with no highlighted row. Arrow keys enter the list from
+            // the top (see `FocusNextItem`).
+            self.set_focused_index(None, should_scroll, ctx);
         }
     }
 
@@ -4881,6 +4883,11 @@ impl DriveIndex {
     pub fn sections(&self) -> &Vec<DriveIndexSection> {
         &self.sections
     }
+
+    #[cfg(test)]
+    pub fn focused_index(&self) -> Option<usize> {
+        self.focused_index
+    }
 }
 
 pub fn warp_drive_section_header_position_id(section: &DriveIndexSection) -> String {
@@ -5365,20 +5372,32 @@ impl TypedActionView for DriveIndex {
                 self.initialize_section_states(ctx);
                 ctx.notify();
             }
-            DriveIndexAction::FocusPreviousItem => {
-                if let Some(current_focused_index) = self.focused_index
-                    && current_focused_index > 0
-                {
-                    self.set_focused_index(Some(current_focused_index - 1), true, ctx);
+            DriveIndexAction::FocusPreviousItem => match self.focused_index {
+                Some(current_focused_index) => {
+                    if current_focused_index > 0 {
+                        self.set_focused_index(Some(current_focused_index - 1), true, ctx);
+                    }
                 }
-            }
-            DriveIndexAction::FocusNextItem => {
-                if let Some(current_focused_index) = self.focused_index
-                    && current_focused_index < self.ordered_items.len() - 1
-                {
-                    self.set_focused_index(Some(current_focused_index + 1), true, ctx);
+                // Entering the list from the unfocused state selects the last row.
+                None => {
+                    if !self.ordered_items.is_empty() {
+                        self.set_focused_index(Some(self.ordered_items.len() - 1), true, ctx);
+                    }
                 }
-            }
+            },
+            DriveIndexAction::FocusNextItem => match self.focused_index {
+                Some(current_focused_index) => {
+                    if current_focused_index < self.ordered_items.len() - 1 {
+                        self.set_focused_index(Some(current_focused_index + 1), true, ctx);
+                    }
+                }
+                // Entering the list from the unfocused state selects the first row.
+                None => {
+                    if !self.ordered_items.is_empty() {
+                        self.set_focused_index(Some(0), true, ctx);
+                    }
+                }
+            },
             DriveIndexAction::LeftArrowKey => {
                 self.execute_index_item_keyboard_action(DriveIndexAction::LeftArrowKey, ctx);
             }
