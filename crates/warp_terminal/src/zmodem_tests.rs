@@ -240,3 +240,82 @@ fn abort_returns_cancel_sequence_for_both_roles() {
     let mut upload = ZmodemSession::new_upload(Vec::new()).expect("upload session");
     assert_eq!(upload.abort(), abort_sequence());
 }
+
+#[test]
+fn download_consumes_the_detected_header_bytes() {
+    // The event loop hands the detected header straight to a fresh session.
+    // If the session cannot consume those bytes, the handshake never advances
+    // and `sz` waits forever.
+    let mut session = ZmodemSession::new_download().expect("download session");
+    let protocol = REAL_SZ_PREAMBLE.strip_prefix(b"rz\r").unwrap();
+
+    let step = session.submit_wire(protocol).expect("submit_wire");
+    assert!(
+        !step.to_pty.is_empty(),
+        "receiver must answer the sender's ZRQINIT"
+    );
+
+    // Feeding the same header again must not be required: the first call has
+    // to make progress, or the transfer deadlocks.
+    let second = session.submit_wire(protocol).expect("submit_wire");
+    assert!(
+        !second.to_pty.is_empty() || second.finished,
+        "session made no progress across two identical reads"
+    );
+}
+
+#[test]
+fn detects_sz_when_shell_echoes_the_command_first() {
+    // In a real terminal the shell echoes `sz file` and a newline before the
+    // protocol starts, and the PTY usually delivers that in the same read.
+    let mut detector = ZmodemDetector::new();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"sz payload.txt\r\n");
+    bytes.extend_from_slice(REAL_SZ_PREAMBLE);
+
+    let (header, _, _) = started(detector.push(&bytes));
+    assert_eq!(header.frame, Frame::Zrqinit);
+}
+
+#[test]
+fn detects_sz_arriving_one_byte_at_a_time() {
+    // A PTY can deliver the preamble in arbitrarily small reads; detection
+    // must not depend on the header landing in a single chunk.
+    let mut detector = ZmodemDetector::new();
+    let mut found = None;
+    for byte in REAL_SZ_PREAMBLE {
+        if let DetectorOutcome::Started { header, .. } = detector.push(&[*byte]) {
+            found = Some(header);
+            break;
+        }
+    }
+    assert_eq!(
+        found.map(|header| header.frame),
+        Some(Frame::Zrqinit),
+        "byte-at-a-time delivery must still detect the header"
+    );
+}
+
+#[test]
+fn holds_back_bytes_exactly_once_across_reads() {
+    // Held-back bytes must be returned for rendering exactly once. Returning
+    // them again on a later read duplicates output on screen.
+    let mut detector = ZmodemDetector::new();
+    let mut rendered = Vec::new();
+    for byte in b"hello*" {
+        if let DetectorOutcome::Render(bytes) = detector.push(&[*byte]) {
+            rendered.extend_from_slice(&bytes);
+        }
+    }
+    // The trailing `*` is a header candidate, so only `hello` may render.
+    assert_eq!(rendered, b"hello");
+
+    // A non-pad byte settles it: the `*` is ordinary text after all.
+    if let DetectorOutcome::Render(bytes) = detector.push(b"x") {
+        rendered.extend_from_slice(&bytes);
+    }
+    assert_eq!(
+        rendered, b"hello*x",
+        "held bytes must render once, in order"
+    );
+}

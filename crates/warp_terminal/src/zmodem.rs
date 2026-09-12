@@ -373,15 +373,22 @@ impl ZmodemDetector {
                 index += 1;
                 continue;
             }
-            // ZMODEM accepts one or two pads before the `ZDLE`.
-            let pads = if working.get(index + 1) == Some(&ZPAD) {
-                2
-            } else {
-                1
+            // ZMODEM accepts one or two pads before the `ZDLE`. A PTY can
+            // split the stream anywhere, so a run that reaches the end of the
+            // buffer is still a candidate: hold it instead of discarding the
+            // pad, or a byte-at-a-time preamble is never recognized.
+            let pads = match working.get(index + 1) {
+                Some(&ZPAD) => 2,
+                Some(_) => 1,
+                None => return DetectorOutcome::Render(working[..index].to_vec()),
             };
-            if working.get(index + pads) != Some(&ZDLE) {
-                index += 1;
-                continue;
+            match working.get(index + pads) {
+                Some(&ZDLE) => {}
+                Some(_) => {
+                    index += 1;
+                    continue;
+                }
+                None => return DetectorOutcome::Render(working[..index].to_vec()),
             }
 
             let prefix_len = pads + 1;

@@ -37,6 +37,12 @@ fn have_sz() -> bool {
 ///
 /// Returns the received bytes and the name the sender advertised.
 fn receive_with_sz(path: &Path) -> (Vec<u8>, String) {
+    receive_with_sz_chunked(path, usize::MAX)
+}
+
+/// Same as [`receive_with_sz`], but caps how many bytes are handed to the
+/// session per call, mimicking a PTY that fragments the stream.
+fn receive_with_sz_chunked(path: &Path, max_chunk: usize) -> (Vec<u8>, String) {
     let pty = nix::pty::openpty(None, None).expect("openpty");
 
     let mut child = Command::new("sz")
@@ -89,19 +95,21 @@ fn receive_with_sz(path: &Path) -> (Vec<u8>, String) {
             Err(error) => panic!("PTY read failed: {error}"),
         };
 
-        let step = session.submit_wire(&buf[..read]).expect("submit_wire");
-        if !step.to_pty.is_empty() {
-            master.write_all(&step.to_pty).expect("write reply");
-        }
-        if let Some(chunk) = step.file_data {
-            if !chunk.name.is_empty() {
-                name = chunk.name;
+        for piece in buf[..read].chunks(max_chunk.max(1)) {
+            let step = session.submit_wire(piece).expect("submit_wire");
+            if !step.to_pty.is_empty() {
+                master.write_all(&step.to_pty).expect("write reply");
             }
-            received.extend_from_slice(&chunk.data);
-        }
-        for event in step.events {
-            if let OwnedEvent::FileStarted { name: started, .. } = event {
-                name = started;
+            if let Some(chunk) = step.file_data {
+                if !chunk.name.is_empty() {
+                    name = chunk.name;
+                }
+                received.extend_from_slice(&chunk.data);
+            }
+            for event in step.events {
+                if let OwnedEvent::FileStarted { name: started, .. } = event {
+                    name = started;
+                }
             }
         }
     }
@@ -147,5 +155,24 @@ fn receives_binary_file_spanning_subpackets_from_real_sz() {
     let (received, name) = receive_with_sz(&path);
     assert_eq!(name, "binary.bin");
     assert_eq!(received.len(), payload.len(), "received byte count differs");
+    assert_eq!(received, payload);
+}
+
+#[test]
+fn receives_file_when_the_pty_fragments_every_byte() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("fragmented.txt");
+    let payload = b"ZMODEM must survive byte-at-a-time PTY reads\n";
+    std::fs::write(&path, payload).expect("write source");
+
+    // A PTY may deliver the preamble one byte per read; detection and the
+    // protocol must not depend on frames arriving whole.
+    let (received, name) = receive_with_sz_chunked(&path, 1);
+    assert_eq!(name, "fragmented.txt");
     assert_eq!(received, payload);
 }
