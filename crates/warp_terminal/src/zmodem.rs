@@ -651,6 +651,20 @@ impl ZmodemSession {
         }
     }
 
+    /// Declares that no further files will be offered, so the sender can close
+    /// the session once the queue drains.
+    pub fn finish_upload(&mut self) -> Result<Vec<u8>, ZmodemError> {
+        match self {
+            ZmodemSession::Download(_) => Ok(Vec::new()),
+            ZmodemSession::Upload(session) => {
+                if session.files.is_empty() && session.current.is_none() {
+                    session.sender.finish()?;
+                }
+                session.step()
+            }
+        }
+    }
+
     /// Aborts the transfer, returning bytes to write to the PTY.
     pub fn abort(&mut self) -> Vec<u8> {
         match self {
@@ -806,11 +820,8 @@ pub struct UploadSession {
 impl UploadSession {
     fn step(&mut self) -> Result<Vec<u8>, ZmodemError> {
         let mut sink = PtySink::new();
-        while let Action::WriteWire(bytes) = self.sender.poll() {
-            let len = bytes.len();
-            sink.write_all(bytes).expect("sink never errors");
-            self.sender.wire_written(len);
-        }
+        let mut step = ZmodemStep::default();
+        self.drain(&mut step, &mut sink)?;
         Ok(sink.take())
     }
 
@@ -819,27 +830,48 @@ impl UploadSession {
         let mut consumed = 0usize;
         let mut sink = PtySink::new();
 
-        while consumed < bytes.len() {
-            let n = self.sender.submit_wire(&bytes[consumed..])?;
-            if n == 0 {
+        // Mirrors the receiver: the sender stops accepting input while it has
+        // work pending, so input and draining must interleave or the tail of
+        // the buffer is lost.
+        loop {
+            let before = consumed;
+            if consumed < bytes.len() {
+                consumed += self.sender.submit_wire(&bytes[consumed..])?;
+            }
+
+            // `start_file` only records the file while the sender is still
+            // waiting for ZRINIT; the ZFILE frame is emitted once the receiver
+            // has introduced itself. Retrying here is what gets it sent.
+            self.offer_next_file()?;
+
+            let drained = self.drain(&mut step, &mut sink)?;
+            if consumed == before && !drained {
                 break;
             }
-            consumed += n;
         }
 
+        step.to_pty = sink.take();
+        Ok(step)
+    }
+
+    /// Drains pending sender actions, returning whether anything was produced.
+    fn drain(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
+        let mut progressed = false;
         loop {
             match self.sender.poll() {
                 Action::WriteWire(to_write) => {
                     let len = to_write.len();
                     sink.write_all(to_write).expect("sink never errors");
                     self.sender.wire_written(len);
+                    progressed = true;
                 }
                 Action::ReadFile { offset, max_len } => {
                     step.file_request = Some(FileRequest {
                         offset: offset.get(),
                         max_len,
                     });
-                    break;
+                    // The caller owns file I/O, so stop and let it supply data.
+                    return Ok(true);
                 }
                 Action::Event(event) => {
                     let owned = own_event(event);
@@ -851,13 +883,12 @@ impl UploadSession {
                         self.finished = true;
                     }
                     step.events.push(owned);
+                    progressed = true;
                 }
                 _ => break,
             }
         }
-
-        step.to_pty = sink.take();
-        Ok(step)
+        Ok(progressed)
     }
 
     /// Offers the next queued file once the sender is ready for one.

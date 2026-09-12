@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use command::blocking::Command;
-use warp_terminal::zmodem::{OwnedEvent, TransferProgress, ZmodemRole, ZmodemSession};
+use warp_terminal::zmodem::{OwnedEvent, TransferProgress, UploadFile, ZmodemRole, ZmodemSession};
 
 /// How long to wait between polls once the peer stops sending.
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -271,4 +271,112 @@ fn renders_progress_and_summary_for_a_real_transfer() {
     assert!(summary.contains("progress.bin"), "summary names the file");
     assert!(summary.contains("16.0 KiB complete"), "got: {summary}");
     assert!(summary.ends_with("\r\n"), "summary stays in scrollback");
+}
+
+/// Whether `rz` is installed and usable.
+fn have_rz() -> bool {
+    Command::new("rz")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success() || status.code() == Some(1))
+}
+
+/// Upload against a real `rz` does not complete yet: `rz` accepts our ZRINIT
+/// handshake but never acknowledges the ZFILE frame, so no file is created.
+/// Kept as a runnable reproduction rather than deleted, so the upload path has
+/// a failing case to fix against.
+#[test]
+#[ignore = "ZMODEM upload does not yet complete against real rz"]
+fn sends_file_to_real_rz() {
+    if !have_rz() {
+        eprintln!("skipping: `rz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("upload.bin");
+    let payload: Vec<u8> = (0..4096u32).map(|index| (index % 256) as u8).collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    // `rz` writes into its working directory, so give it a clean one.
+    let dest_dir = dir.path().join("dest");
+    std::fs::create_dir(&dest_dir).expect("create dest dir");
+
+    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let mut child = Command::new("rz")
+        .arg("--binary")
+        .current_dir(&dest_dir)
+        // SAFETY: descriptors are duplicated so parent and child each own one.
+        .stdin(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stdout(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rz");
+    // SAFETY: the child holds its own duplicated descriptors.
+    unsafe { libc::close(pty.slave) };
+    // SAFETY: `master` is a descriptor this test exclusively owns.
+    let mut master: File = unsafe { File::from_raw_fd(pty.master) };
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+    let files = vec![UploadFile {
+        path: source.clone(),
+        name: b"upload.bin".to_vec(),
+        size: payload.len() as u32,
+    }];
+    let mut session = ZmodemSession::new_upload(files).expect("upload session");
+
+    // Only the ZRQINIT goes out first; the file is offered once `rz`
+    // introduces itself with ZRINIT.
+    let handshake = session.initial_output().expect("initial output");
+    master.write_all(&handshake).expect("write handshake");
+
+    let mut buf = [0u8; 8192];
+    let mut idle = 0;
+    while !session.is_finished() && idle < IDLE_POLL_LIMIT {
+        let read = match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                idle = 0;
+                n
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                idle += 1;
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => panic!("PTY read failed: {error}"),
+        };
+
+        let mut step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        if !step.to_pty.is_empty() {
+            master.write_all(&step.to_pty).expect("write reply");
+        }
+
+        // Answer file-data requests until the sender stops asking, mirroring
+        // what the event loop does.
+        while let Some(request) = step.file_request {
+            let start = request.offset as usize;
+            let end = (start + request.max_len).min(payload.len());
+            let reply = session
+                .submit_file(&payload[start..end])
+                .expect("submit_file");
+            if !reply.is_empty() {
+                master.write_all(&reply).expect("write file data");
+            }
+            let next = session.offer_next_file().expect("offer next");
+            if !next.is_empty() {
+                master.write_all(&next).expect("write next offer");
+            }
+            step = Default::default();
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let landed = dest_dir.join("upload.bin");
+    assert!(landed.exists(), "rz did not create the file");
+    assert_eq!(std::fs::read(&landed).expect("read landed file"), payload);
 }
