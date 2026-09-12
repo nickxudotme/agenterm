@@ -517,6 +517,22 @@ pub struct UploadFile {
     pub size: u32,
 }
 
+impl UploadFile {
+    /// The file's modification time as the octal string `sz` sends.
+    ///
+    /// `rz` parses this field but does not require it to be accurate, so an
+    /// unreadable timestamp falls back to zero rather than failing the send.
+    fn mtime_octal(&self) -> String {
+        let seconds = std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        format!("{seconds:o}")
+    }
+}
+
 /// Builds the canonical ZMODEM abort sequence.
 ///
 /// Two `CAN`s are the protocol payload; the trailing backspaces are padding
@@ -590,6 +606,7 @@ impl ZmodemSession {
             files: files.into_iter().collect::<VecDeque<_>>(),
             current: None,
             finished: false,
+            pending_zfile: None,
         })))
     }
 
@@ -815,6 +832,11 @@ pub struct UploadSession {
     files: VecDeque<UploadFile>,
     current: Option<UploadFile>,
     finished: bool,
+    /// ZFILE frame to emit once the receiver has introduced itself.
+    ///
+    /// `zmodem2` omits the metadata `rz` requires, so the frame is built here
+    /// and sent directly instead.
+    pending_zfile: Option<Vec<u8>>,
 }
 
 impl UploadSession {
@@ -845,7 +867,10 @@ impl UploadSession {
             self.offer_next_file()?;
 
             let drained = self.drain(&mut step, &mut sink)?;
-            if consumed == before && !drained {
+
+            // A pending file request needs the caller to supply data, so stop
+            // here rather than polling it again in a tight loop.
+            if step.file_request.is_some() || (consumed == before && !drained) {
                 break;
             }
         }
@@ -861,7 +886,18 @@ impl UploadSession {
             match self.sender.poll() {
                 Action::WriteWire(to_write) => {
                     let len = to_write.len();
-                    sink.write_all(to_write).expect("sink never errors");
+                    // Substitute our ZFILE for `zmodem2`'s, which `rz` ignores.
+                    // Both describe the same file, so the state machine stays
+                    // consistent; only the bytes on the wire differ.
+                    match self.pending_zfile.take() {
+                        Some(frame) if is_zfile_frame(to_write) => {
+                            sink.write_all(&frame).expect("sink never errors");
+                        }
+                        pending => {
+                            self.pending_zfile = pending;
+                            sink.write_all(to_write).expect("sink never errors");
+                        }
+                    }
                     self.sender.wire_written(len);
                     progressed = true;
                 }
@@ -901,6 +937,8 @@ impl UploadSession {
         };
         self.sender
             .start_file(FileInfo::new(&file.name, Some(Position::new(file.size))))?;
+        // Queue our own frame; `zmodem2`'s is missing metadata `rz` needs.
+        self.pending_zfile = Some(zfile_frame(&file.name, file.size, &file.mtime_octal()));
         self.current = Some(file);
         Ok(())
     }
@@ -931,6 +969,99 @@ fn own_event(event: Event<'_>) -> OwnedEvent {
         Event::Aborted => OwnedEvent::Aborted,
         _ => OwnedEvent::Aborted,
     }
+}
+
+/// ZDLE escape table: maps a byte to its escaped form.
+const ZDLE_TABLE: [u8; 0x100] = {
+    let mut table = [0u8; 0x100];
+    let mut index = 0;
+    while index < 0x100 {
+        table[index] = index as u8;
+        index += 1;
+    }
+    // Control characters ZMODEM must not put on the wire bare.
+    table[0x0d] = 0x4d;
+    table[0x10] = 0x50;
+    table[0x11] = 0x51;
+    table[0x13] = 0x53;
+    table[0x18] = 0x58;
+    table[0x8d] = 0xcd;
+    table[0x90] = 0xd0;
+    table[0x91] = 0xd1;
+    table[0x93] = 0xd3;
+    table[0x7f] = 0x6c;
+    table[0xff] = 0x6d;
+    table
+};
+
+/// Whether `byte` must be escaped before transmission.
+fn needs_escape(byte: u8) -> bool {
+    ZDLE_TABLE[byte as usize] != byte || byte == ZDLE
+}
+
+/// Appends `byte`, escaping it when the protocol requires.
+fn push_escaped(out: &mut Vec<u8>, byte: u8) {
+    if needs_escape(byte) {
+        out.push(ZDLE);
+        out.push(ZDLE_TABLE[byte as usize]);
+    } else {
+        out.push(byte);
+    }
+}
+
+/// Whether `bytes` begins a `ZBIN32` `ZFILE` frame.
+fn is_zfile_frame(bytes: &[u8]) -> bool {
+    bytes.len() > 3
+        && bytes[0] == ZPAD
+        && bytes[1] == ZDLE
+        && bytes[2] == Encoding::Zbin32 as u8
+        && bytes[3] == Frame::Zfile.frame_byte()
+}
+
+/// Builds a `ZFILE` frame that `lrzsz`'s `rz` accepts.
+///
+/// `zmodem2` emits only the name and size, but `rz` requires the full metadata
+/// line that `sz` sends (`size mtime mode files_remaining bytes_remaining`)
+/// and the `ZCONV` flag in the header. Without them it silently ignores the
+/// frame and the transfer never starts, so this frame is built here instead.
+pub fn zfile_frame(name: &[u8], size: u32, mtime_octal: &str) -> Vec<u8> {
+    // ZBIN32 header: frame type, then flags. The final flag byte carries
+    // ZCONV=ZCBIN (binary, no newline translation), which `sz` also sets.
+    let mut payload = Vec::new();
+    payload.push(Frame::Zfile.frame_byte());
+    payload.extend_from_slice(&[0, 0, 0, 1]);
+
+    let mut out = Vec::new();
+    out.push(ZPAD);
+    out.push(ZDLE);
+    out.push(Encoding::Zbin32 as u8);
+    let header_crc = crc32_iso_hdlc(&payload).to_le_bytes();
+    for &byte in payload.iter().chain(header_crc.iter()) {
+        push_escaped(&mut out, byte);
+    }
+
+    // Metadata subpacket: NUL-terminated name, then the fields `rz` parses.
+    // `files_remaining` and `bytes_remaining` describe this single file.
+    let mut data = Vec::new();
+    data.extend_from_slice(name);
+    data.push(0);
+    data.extend_from_slice(format!("{size} {mtime_octal} 100644 0 1 {size}\0").as_bytes());
+
+    for &byte in &data {
+        push_escaped(&mut out, byte);
+    }
+    // ZCRCW: this subpacket ends the frame and expects a response.
+    const ZCRCW: u8 = b'k';
+    out.push(ZDLE);
+    out.push(ZCRCW);
+
+    let mut crc_input = data.clone();
+    crc_input.push(ZCRCW);
+    let data_crc = crc32_iso_hdlc(&crc_input).to_le_bytes();
+    for &byte in &data_crc {
+        push_escaped(&mut out, byte);
+    }
+    out
 }
 
 /// Sink that `zmodem2` writes outgoing protocol bytes into.

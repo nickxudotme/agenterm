@@ -412,3 +412,65 @@ fn role_labels_distinguish_direction() {
     assert_eq!(ZmodemRole::Download.label(), "sz <<");
     assert_eq!(ZmodemRole::Upload.label(), "rz >>");
 }
+
+/// The ZFILE frame real `sz` sends for a 4-byte `tiny.txt`, captured from
+/// `sz --zmodem --binary` over a PTY. `rz` ignores frames that do not carry
+/// this shape, so it is the reference our own frame must match.
+const REAL_SZ_ZFILE: &[u8] = b"*\x18C\x04\x00\x00\x00\x01\x4b\x61\xa5\x44\
+tiny.txt\x004 15251177707 100644 0 1 4\x00\x18k";
+
+#[test]
+fn zfile_frame_matches_the_shape_real_sz_sends() {
+    let frame = zfile_frame(b"tiny.txt", 4, "15251177707");
+
+    // Header: single ZPAD, ZDLE, ZBIN32, frame type, then ZCONV=ZCBIN.
+    assert_eq!(&frame[..3], &[ZPAD, ZDLE, Encoding::Zbin32 as u8]);
+    assert_eq!(frame[3], Frame::Zfile.frame_byte());
+    assert_eq!(&frame[4..8], &[0, 0, 0, 1], "ZCONV must be set, as sz does");
+
+    let text = String::from_utf8_lossy(&frame);
+    assert!(text.contains("tiny.txt\u{0}"), "name is NUL terminated");
+    assert!(
+        text.contains("4 15251177707 100644 0 1 4"),
+        "rz requires the full metadata line, got: {text:?}"
+    );
+
+    // The reference frame carries the same metadata after its header CRC.
+    let reference = String::from_utf8_lossy(REAL_SZ_ZFILE);
+    assert!(reference.contains("4 15251177707 100644 0 1 4"));
+}
+
+#[test]
+fn zfile_frame_ends_with_zcrcw_and_a_checksum() {
+    let frame = zfile_frame(b"a.bin", 10, "0");
+    // ZCRCW marks the frame as complete and awaiting a response.
+    let zcrcw = frame
+        .windows(2)
+        .rposition(|w| w == [ZDLE, b'k'])
+        .expect("frame must end its subpacket with ZDLE ZCRCW");
+    // A CRC-32 follows, so some bytes must remain after the marker.
+    assert!(frame.len() > zcrcw + 2, "checksum must follow ZCRCW");
+}
+
+#[test]
+fn zfile_frame_escapes_control_bytes_in_the_name() {
+    // A name containing a byte that must never appear bare on the wire.
+    let frame = zfile_frame(b"a\x18b.bin", 1, "0");
+    // The raw ZDLE must not survive unescaped inside the payload.
+    let payload = &frame[8..];
+    let bare = payload.windows(2).any(|w| w[0] == ZDLE && w[1] == 0x18);
+    assert!(!bare, "a literal ZDLE must be escaped, not doubled raw");
+}
+
+#[test]
+fn escape_table_covers_the_control_bytes_zmodem_reserves() {
+    for byte in [
+        0x0d, 0x10, 0x11, 0x13, 0x18, 0x7f, 0x8d, 0x90, 0x91, 0x93, 0xff,
+    ] {
+        assert!(needs_escape(byte), "{byte:#02x} must be escaped");
+    }
+    // Ordinary printable bytes travel as themselves.
+    for byte in b"abcXYZ0129 ._-" {
+        assert!(!needs_escape(*byte), "{byte:#02x} must not be escaped");
+    }
+}
