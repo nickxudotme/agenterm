@@ -233,6 +233,15 @@ fn finish_zmodem_step(
         state.write_list.push_back(Cow::Owned(step.to_pty.clone()));
     }
 
+    if let Some(chunk) = &step.file_data
+        && !chunk.data.is_empty()
+    {
+        listener.send_terminal_event(TerminalEvent::ZmodemFileData {
+            name: chunk.name.clone(),
+            data: chunk.data.clone(),
+        });
+    }
+
     for event in &step.events {
         match event {
             OwnedEvent::FileStarted { name, size } => {

@@ -175,6 +175,13 @@ pub enum Event {
         bytes_transferred: u64,
         bytes_total: u64,
     },
+    /// A chunk of received file data, to be appended to the file in flight.
+    ///
+    /// Carried as an event because the PTY thread cannot block on file I/O.
+    ZmodemFileData {
+        name: String,
+        data: Vec<u8>,
+    },
     /// A file finished transferring.
     ZmodemFileCompleted {
         file_name: String,

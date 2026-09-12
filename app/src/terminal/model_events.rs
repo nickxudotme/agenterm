@@ -277,6 +277,25 @@ impl ModelEventDispatcher {
                 image_data,
                 image_protocol,
             },
+            Event::ZmodemDownloadStarted { file_name } => {
+                ModelEvent::ZmodemDownloadStarted { file_name }
+            }
+            Event::ZmodemProgress {
+                file_name,
+                bytes_transferred,
+                bytes_total,
+            } => ModelEvent::ZmodemProgress {
+                file_name,
+                bytes_transferred,
+                bytes_total,
+            },
+            Event::ZmodemFileData { name, data } => {
+                ModelEvent::ZmodemFileData { name, data }
+            }
+            Event::ZmodemFileCompleted { file_name } => {
+                ModelEvent::ZmodemFileCompleted { file_name }
+            }
+            Event::ZmodemFinished { error } => ModelEvent::ZmodemFinished { error },
             Event::BootstrapPrecmdDone => ModelEvent::BootstrapPrecmdDone,
             Event::AgentTaggedInChanged {
                 block_id,
@@ -485,6 +504,29 @@ pub enum ModelEvent {
     /// child) before the outer ssh tunnel starts closing.
     ExitShell {
         session_id: SessionId,
+    },
+    /// A remote `sz` began a ZMODEM download.
+    ZmodemDownloadStarted {
+        file_name: Option<String>,
+    },
+    /// Progress for the in-flight ZMODEM transfer.
+    ZmodemProgress {
+        file_name: String,
+        bytes_transferred: u64,
+        bytes_total: u64,
+    },
+    /// A chunk of received file data to append to the file in flight.
+    ZmodemFileData {
+        name: String,
+        data: Vec<u8>,
+    },
+    /// A file finished transferring.
+    ZmodemFileCompleted {
+        file_name: String,
+    },
+    /// The transfer ended; `error` is `None` on success.
+    ZmodemFinished {
+        error: Option<String>,
     },
 }
 

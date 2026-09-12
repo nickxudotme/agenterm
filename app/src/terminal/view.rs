@@ -504,6 +504,7 @@ use crate::terminal::view::zero_state_block::TerminalViewZeroStateBlock;
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::waterfall_gap_element::WaterfallGapElement;
 use crate::terminal::writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
+use crate::terminal::zmodem_transfer::ZmodemTransfer;
 use crate::terminal::{
     AudibleBell, BlockListSettings, BlockListSettingsChangedEvent, CellSizeAndWindowPadding,
     History, HistoryEntry, ShellHost, ShellLaunchData, SizeInfo, SizeUpdate, SizeUpdateReason,
@@ -13063,6 +13064,40 @@ impl TerminalView {
                 ctx.notify();
             }
             ModelEvent::CompletionsFinished(..) => {}
+            ModelEvent::ZmodemDownloadStarted { .. } => {
+                log::info!("ZMODEM download started");
+            }
+            ModelEvent::ZmodemProgress {
+                file_name,
+                bytes_transferred,
+                bytes_total,
+            } => {
+                ZmodemTransfer::handle(ctx).update(ctx, |transfer, _ctx| {
+                    transfer.note_progress(
+                        file_name.clone(),
+                        *bytes_transferred,
+                        *bytes_total,
+                    );
+                });
+            }
+            ModelEvent::ZmodemFileData { name, data } => {
+                ZmodemTransfer::handle(ctx).update(ctx, |transfer, _ctx| {
+                    transfer.note_progress(name.clone(), 0, 0);
+                    transfer.append_data(data);
+                });
+            }
+            ModelEvent::ZmodemFileCompleted { .. } => {
+                let window_id = self.window_id;
+                ZmodemTransfer::handle(ctx).update(ctx, |transfer, ctx| {
+                    transfer.finish_file(window_id, ctx);
+                });
+            }
+            ModelEvent::ZmodemFinished { error } => {
+                let window_id = self.window_id;
+                ZmodemTransfer::handle(ctx).update(ctx, |transfer, ctx| {
+                    transfer.finish_transfer(error.clone(), window_id, ctx);
+                });
+            }
             ModelEvent::ImageReceived {
                 image_id,
                 image_data,
