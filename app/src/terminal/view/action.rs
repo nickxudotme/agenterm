@@ -332,6 +332,11 @@ pub enum TerminalAction {
     AttemptLoginGatedFeature,
     StartFileDropTarget,
     StopFileDropTarget,
+    /// Sends local files to a remote `rz` over ZMODEM.
+    ///
+    /// Uploads need an explicit trigger because `rz` waits for the sender to
+    /// start; there is no remote signal the client could detect on its own.
+    SendFilesWithZmodem,
     OpenTeamSettingsPage,
     SetMarkedText {
         marked_text: UserInput<String>,
@@ -665,6 +670,7 @@ impl fmt::Debug for TerminalAction {
             HyperlinkClick(hyperlink_url) => write!(f, "HyperlinkClick({hyperlink_url:?})"),
             AttemptLoginGatedFeature => write!(f, "AttemptLoginGatedFeature"),
             StartFileDropTarget => write!(f, "StartFileDropTarget"),
+            SendFilesWithZmodem => write!(f, "SendFilesWithZmodem"),
             StopFileDropTarget => write!(f, "StopFileDropTarget"),
             RunNativeShellCompletions { buffer_text, .. } => {
                 write!(f, "RunNativeShellCompletions({buffer_text:?})")

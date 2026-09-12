@@ -615,6 +615,12 @@ pub fn init(app: &mut AppContext) {
         .with_context_predicate(
             id!("Terminal") & ne!("TerminalView_BlockSelectionCardinality", "None"),
         ),
+        EditableBinding::new(
+            "terminal:send_files_with_zmodem",
+            "Send files to remote (rz)",
+            TerminalAction::SendFilesWithZmodem,
+        )
+        .with_context_predicate(id!("Terminal")),
     ]);
 
     app.register_editable_bindings([

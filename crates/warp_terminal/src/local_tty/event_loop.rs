@@ -22,7 +22,8 @@ use crate::local_tty;
 use crate::model::ansi;
 use crate::writeable_pty::Message;
 use crate::zmodem::{
-    DetectorOutcome, Frame, OwnedEvent, ZmodemDetector, ZmodemError, ZmodemSession, ZmodemStep,
+    DetectorOutcome, FileRequest, Frame, OwnedEvent, UploadFile, ZmodemDetector, ZmodemError,
+    ZmodemSession, ZmodemStep,
 };
 
 /// The size of the buffer to read data into from the PTY.
@@ -58,6 +59,9 @@ pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
     /// The active ZMODEM transfer, once one has been detected. Bytes are routed
     /// here instead of the ANSI parser until the transfer ends.
     zmodem: Option<ZmodemSession>,
+
+    /// File contents for an in-flight upload, in the order they are offered.
+    upload_contents: Vec<Vec<u8>>,
 
     /// The event listener is available to the PTY event loop
     /// to emit relevant events to subscribers. The ansi handler
@@ -152,6 +156,20 @@ enum ChannelResult {
     TerminateLoop { child_exited: bool },
 }
 
+/// Returns the bytes an upload's `ReadFile` request asks for.
+///
+/// Uploads are offered one file at a time, so the request always refers to the
+/// first queued file's contents.
+fn upload_chunk(contents: &[Vec<u8>], request: FileRequest) -> Option<Vec<u8>> {
+    let data = contents.first()?;
+    let start = usize::try_from(request.offset).ok()?;
+    if start >= data.len() {
+        return None;
+    }
+    let end = start.saturating_add(request.max_len).min(data.len());
+    Some(data[start..end].to_vec())
+}
+
 /// Routes PTY output through the active ZMODEM transfer, if any.
 ///
 /// Returns the bytes that should still be rendered by the terminal. During a
@@ -163,19 +181,37 @@ enum ChannelResult {
 fn route_zmodem(
     detector: &mut ZmodemDetector,
     active: &mut Option<ZmodemSession>,
+    contents: &[Vec<u8>],
     listener: &ChannelEventListener,
     bytes: &[u8],
     state: &mut State,
 ) -> Vec<u8> {
     if let Some(session) = active.as_mut() {
-        return finish_zmodem_step(
-            session.submit_wire(bytes),
-            active,
-            detector,
-            listener,
-            state,
-        )
-        .unwrap_or_default();
+        let mut step = session.submit_wire(bytes);
+
+        // An upload must keep answering `ReadFile` requests and offering the
+        // next file until the sender stops asking, or the transfer stalls.
+        while let Ok(current) = step.as_ref() {
+            let Some(request) = current.file_request else {
+                break;
+            };
+            let Some(chunk) = upload_chunk(contents, request) else {
+                break;
+            };
+            step = session.submit_file(&chunk).and_then(|to_pty| {
+                if !to_pty.is_empty() {
+                    state.write_list.push_back(Cow::Owned(to_pty));
+                }
+                session.offer_next_file().map(|bytes| {
+                    if !bytes.is_empty() {
+                        state.write_list.push_back(Cow::Owned(bytes));
+                    }
+                    ZmodemStep::default()
+                })
+            });
+        }
+
+        return finish_zmodem_step(step, active, detector, listener, state).unwrap_or_default();
     }
 
     match detector.push(bytes) {
@@ -315,6 +351,7 @@ where
             terminal,
             zmodem_detector: ZmodemDetector::new(),
             zmodem: None,
+            upload_contents: Vec::new(),
             event_listener,
         }
     }
@@ -332,6 +369,7 @@ where
                     };
                 }
                 Message::Resize(size) => self.pty.on_resize(&size),
+                Message::StartZmodemUpload { paths } => self.start_zmodem_upload(paths, state),
                 Message::ChildExited => return ChannelResult::TerminateLoop { child_exited: true },
             }
         }
@@ -402,6 +440,7 @@ where
             let renderable = route_zmodem(
                 &mut self.zmodem_detector,
                 &mut self.zmodem,
+                &self.upload_contents,
                 &self.event_listener,
                 &buf[..bytes_in_buffer],
                 state,
@@ -452,6 +491,73 @@ where
         }
 
         Ok(())
+    }
+
+    /// Starts a ZMODEM upload of `paths` to a remote `rz`.
+    ///
+    /// Files are read eagerly: the PTY thread must not block on disk I/O while
+    /// the protocol is mid-frame, and ZMODEM needs each size up front anyway.
+    fn start_zmodem_upload(&mut self, paths: Vec<std::path::PathBuf>, state: &mut State) {
+        if self.zmodem.is_some() {
+            log::warn!("A ZMODEM transfer is already in progress; ignoring upload request");
+            return;
+        }
+
+        let mut files = Vec::new();
+        let mut contents = Vec::new();
+        for path in paths {
+            let data = match std::fs::read(&path) {
+                Ok(data) => data,
+                Err(error) => {
+                    log::warn!("Skipping unreadable ZMODEM upload file: {error}");
+                    continue;
+                }
+            };
+            let Ok(size) = u32::try_from(data.len()) else {
+                log::warn!("Skipping ZMODEM upload file larger than 4 GiB");
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.as_encoded_bytes().to_vec())
+                .unwrap_or_default();
+            files.push(UploadFile { path, name, size });
+            contents.push(data);
+        }
+
+        if files.is_empty() {
+            self.event_listener
+                .send_terminal_event(TerminalEvent::ZmodemFinished {
+                    error: Some("No readable files to send".to_owned()),
+                });
+            return;
+        }
+
+        let mut session = match ZmodemSession::new_upload(files) {
+            Ok(session) => session,
+            Err(error) => {
+                log::warn!("Failed to start ZMODEM upload: {error}");
+                self.event_listener
+                    .send_terminal_event(TerminalEvent::ZmodemFinished {
+                        error: Some(error.to_string()),
+                    });
+                return;
+            }
+        };
+
+        // `rz` waits for the sender, so the handshake has to go out first.
+        match session.initial_output() {
+            Ok(bytes) if !bytes.is_empty() => state.write_list.push_back(Cow::Owned(bytes)),
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!("Failed to begin ZMODEM upload handshake: {error}");
+                return;
+            }
+        }
+
+        self.upload_contents = contents;
+        self.zmodem = Some(session);
+        self.zmodem_detector.reset();
     }
 
     #[inline]

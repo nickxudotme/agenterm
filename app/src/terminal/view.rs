@@ -171,7 +171,7 @@ use warpui::geometry::vector::{Vector2F, vec2f};
 use warpui::image_cache::ImageType;
 use warpui::keymap::Keystroke;
 use warpui::notification::{NotificationSendError, RequestPermissionsOutcome, UserNotification};
-use warpui::platform::{Cursor, OperatingSystem};
+use warpui::platform::{Cursor, FilePickerConfiguration, OperatingSystem};
 use warpui::text::SelectionType;
 use warpui::ui_components::components::UiComponent;
 use warpui::units::{IntoLines, IntoPixels, Lines, Pixels};
@@ -1763,6 +1763,10 @@ pub enum Event {
     ShutdownPty,
     // TODO: break this event down into higher-level events that hide the
     // `bytes` detail from the view.
+    /// Start a ZMODEM upload of the given local files.
+    StartZmodemUpload {
+        paths: Vec<std::path::PathBuf>,
+    },
     WriteBytesToPty {
         bytes: Cow<'static, [u8]>,
     },
@@ -26781,6 +26785,9 @@ impl PtyIntentEvent for Event {
         match self {
             Event::CtrlD => Some(PtyIntent::CtrlD),
             Event::ShutdownPty => Some(PtyIntent::ShutdownPty),
+            Event::StartZmodemUpload { paths } => Some(PtyIntent::StartZmodemUpload {
+                paths: paths.clone(),
+            }),
             Event::WriteBytesToPty { bytes } => Some(PtyIntent::WriteBytes(bytes.clone())),
             Event::WriteAgentInputToPty { bytes, mode } => Some(PtyIntent::WriteAgentInput {
                 bytes: bytes.clone(),
@@ -27213,6 +27220,7 @@ impl TypedActionView for TerminalView {
             | AttemptLoginGatedFeature
             | StartFileDropTarget
             | StopFileDropTarget
+            | SendFilesWithZmodem
             | RunNativeShellCompletions { .. }
             | OpenTeamSettingsPage
             | HideTelemetryBannerPermanently
@@ -27836,6 +27844,25 @@ impl TypedActionView for TerminalView {
                         ctx,
                     )
                 });
+            }
+            SendFilesWithZmodem => {
+                // `rz` must already be running on the remote end; it waits for
+                // the sender, so the picker is the only trigger we can offer.
+                let config = FilePickerConfiguration::new().allow_multi_select();
+                ctx.open_file_picker(
+                    move |result, ctx: &mut ViewContext<Self>| match result {
+                        Ok(paths) if !paths.is_empty() => {
+                            let paths: Vec<std::path::PathBuf> =
+                                paths.into_iter().map(std::path::PathBuf::from).collect();
+                            ctx.emit(Event::StartZmodemUpload { paths });
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            log::warn!("Could not choose files for ZMODEM upload: {error}");
+                        }
+                    },
+                    config,
+                );
             }
             StartFileDropTarget => {
                 let Some(session) = self

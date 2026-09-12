@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::*;
 
 /// The first bytes real `lrzsz` `sz` writes: `rz\r` then a `ZRQINIT` header
@@ -167,4 +169,74 @@ fn sink_collects_and_takes_bytes() {
     std::io::Write::write_all(&mut sink, b"def").unwrap();
     assert_eq!(sink.take(), b"abcdef");
     assert!(sink.take().is_empty());
+}
+
+#[test]
+fn upload_session_queues_files() {
+    let files = vec![
+        UploadFile {
+            path: PathBuf::from("/tmp/a.txt"),
+            name: b"a.txt".to_vec(),
+            size: 4,
+        },
+        UploadFile {
+            path: PathBuf::from("/tmp/b.txt"),
+            name: b"b.txt".to_vec(),
+            size: 8,
+        },
+    ];
+    let mut session = ZmodemSession::new_upload(files).expect("upload session");
+    assert_eq!(session.role(), ZmodemRole::Upload);
+    assert!(!session.is_finished());
+
+    // The sender opens with a ZRQINIT so a waiting `rz` starts handshaking.
+    let initial = session.initial_output().expect("initial output");
+    let mut detector = ZmodemDetector::new();
+    let (header, _, _) = started(detector.push(&initial));
+    assert_eq!(header.frame, Frame::Zrqinit);
+}
+
+#[test]
+fn download_session_opens_with_zrinit() {
+    let mut session = ZmodemSession::new_download().expect("download session");
+    assert_eq!(session.role(), ZmodemRole::Download);
+
+    // The receiver advertises its capabilities before any data arrives.
+    let initial = session.initial_output().expect("initial output");
+    let mut detector = ZmodemDetector::new();
+    let (header, _, _) = started(detector.push(&initial));
+    assert_eq!(header.frame, Frame::Zrinit);
+}
+
+#[test]
+fn download_consumes_real_sz_handshake_without_rendering() {
+    let mut session = ZmodemSession::new_download().expect("download session");
+    let _ = session.initial_output().expect("initial output");
+
+    // Feed the exact ZRQINIT that `sz` emits; it must be accepted, and the
+    // receiver must answer rather than leave the transfer silent.
+    let protocol = REAL_SZ_PREAMBLE.strip_prefix(b"rz\r").unwrap();
+    let step = session.submit_wire(protocol).expect("submit_wire");
+    assert!(!step.finished, "handshake must not end the session");
+    assert!(
+        !step.to_pty.is_empty(),
+        "receiver must reply to the sender's ZRQINIT"
+    );
+}
+
+#[test]
+fn upload_only_sessions_ignore_download_operations() {
+    // Guards the role split: a download must never be asked for file bytes.
+    let mut download = ZmodemSession::new_download().expect("download session");
+    assert!(download.offer_next_file().expect("no-op").is_empty());
+    assert!(download.submit_file(b"data").expect("no-op").is_empty());
+}
+
+#[test]
+fn abort_returns_cancel_sequence_for_both_roles() {
+    let mut download = ZmodemSession::new_download().expect("download session");
+    assert_eq!(download.abort(), abort_sequence());
+
+    let mut upload = ZmodemSession::new_upload(Vec::new()).expect("upload session");
+    assert_eq!(upload.abort(), abort_sequence());
 }

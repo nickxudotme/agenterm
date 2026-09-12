@@ -243,7 +243,7 @@ fn is_hex_digit(byte: u8) -> bool {
 /// Validates a fully received header body and decodes it.
 fn decode_header_body(encoding: Encoding, body: &[u8]) -> Option<Header> {
     if encoding == Encoding::Zhex {
-        if body.len() % 2 != 0 {
+        if !body.len().is_multiple_of(2) {
             return None;
         }
         // Both hex cases are legal on the wire.
@@ -698,15 +698,10 @@ pub struct UploadSession {
 impl UploadSession {
     fn step(&mut self) -> Result<Vec<u8>, ZmodemError> {
         let mut sink = PtySink::new();
-        loop {
-            match self.sender.poll() {
-                Action::WriteWire(bytes) => {
-                    let len = bytes.len();
-                    sink.write_all(bytes).expect("sink never errors");
-                    self.sender.wire_written(len);
-                }
-                _ => break,
-            }
+        while let Action::WriteWire(bytes) = self.sender.poll() {
+            let len = bytes.len();
+            sink.write_all(bytes).expect("sink never errors");
+            self.sender.wire_written(len);
         }
         Ok(sink.take())
     }

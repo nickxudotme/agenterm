@@ -27,6 +27,10 @@ pub enum PtyIntent {
     Interrupt,
     ShutdownPty,
     WriteBytes(Cow<'static, [u8]>),
+    /// Starts a ZMODEM upload of `paths` to a remote `rz`.
+    StartZmodemUpload {
+        paths: Vec<std::path::PathBuf>,
+    },
     WriteAgentInput {
         bytes: Cow<'static, [u8]>,
         mode: AIAgentPtyWriteMode,

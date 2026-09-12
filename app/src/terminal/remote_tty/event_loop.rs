@@ -156,6 +156,12 @@ impl EventLoop {
                                 );
                             };
                         }
+                        // ZMODEM is driven by the local PTY event loop, which
+                        // owns the byte stream; a network-backed PTY has no
+                        // equivalent interception point.
+                        EventLoopMessage::StartZmodemUpload { .. } => {
+                            log::warn!("ZMODEM uploads are not supported on a network-backed PTY");
+                        }
                         // TODO(alokedesai): Implement shutdown on the network backed PTY.
                         EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => {}
                     }

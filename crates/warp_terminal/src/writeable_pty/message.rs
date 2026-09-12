@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crate::SizeInfo;
 
@@ -20,4 +21,9 @@ pub enum Message {
 
     /// Instruction to resize the PTY.
     Resize(SizeInfo),
+
+    /// Start a ZMODEM upload of the given local files to a remote `rz`.
+    ///
+    /// The transfer is driven on the PTY thread, which owns the byte stream.
+    StartZmodemUpload { paths: Vec<PathBuf> },
 }

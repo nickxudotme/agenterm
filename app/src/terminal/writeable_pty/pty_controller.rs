@@ -604,6 +604,15 @@ impl<T: EventLoopSender> PtyController<T> {
         );
     }
 
+    /// Starts a ZMODEM upload of `paths`, driven on the PTY thread.
+    pub fn start_zmodem_upload(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.send_message_to_event_loop(Message::StartZmodemUpload { paths }, ctx);
+    }
+
     /// Shuts down the pty and event loop.
     pub fn shutdown_pty(&mut self, ctx: &mut ModelContext<Self>) {
         self.send_message_to_event_loop(Message::Shutdown, ctx);
