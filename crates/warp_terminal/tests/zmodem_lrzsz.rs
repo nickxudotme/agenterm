@@ -300,19 +300,22 @@ fn have_rz() -> bool {
         .is_ok_and(|status| status.success() || status.code() == Some(1))
 }
 
-/// Upload against a real `rz` is not finished yet. `rz` now accepts our ZFILE
-/// and the file lands on disk with the right contents, but the session never
-/// closes: `rz` re-requests from offset zero instead of acknowledging ZEOF.
+/// Upload against a real `rz` is close but not complete.
 ///
-/// The remaining gap is the send cadence. `zmodem2` expects one action per
-/// `poll`, with `submit_file` followed immediately by further polling so the
-/// data frame reaches the wire; our session drains in batches instead, which
-/// is what leaves ZEOF unsent. See the crate's own `tests/integration.rs`.
+/// `rz` accepts our ZFILE, requests data, and the whole payload goes out in
+/// one frame. It then answers ZRPOS with offset zero instead of acknowledging
+/// the data, so the transfer restarts and the session never closes.
 ///
-/// Kept as a runnable reproduction rather than deleted, so the upload path has
-/// a concrete failing case to fix against.
+/// The remaining cause is the data frame's trailer: `zmodem2` ends the frame
+/// with ZCRCW (0x6b), which asks the receiver to respond before more data,
+/// while `sz` ends a streaming frame with ZCRCE (0x68) and follows it with
+/// ZEOF. Substituting our own ZFILE also changes the ZCONV terms the rest of
+/// the stream is interpreted under, so the frame trailer has to match.
+///
+/// Kept runnable rather than deleted so the remaining gap has a concrete
+/// failing case, with the evidence above already gathered.
 #[test]
-#[ignore = "ZMODEM upload does not close the session against real rz"]
+#[ignore = "ZMODEM upload: rz rejects the data frame trailer and restarts"]
 fn sends_file_to_real_rz() {
     if !have_rz() {
         eprintln!("skipping: `rz` (lrzsz) is not installed");
@@ -351,16 +354,14 @@ fn sends_file_to_real_rz() {
     }];
     let mut session = ZmodemSession::new_upload(files).expect("upload session");
 
-    // Only the ZRQINIT goes out first; the file is offered once `rz`
-    // introduces itself with ZRINIT.
-    let handshake = session.initial_output().expect("initial output");
+    let handshake = session.begin_upload().expect("begin upload");
     write_all_blocking(&mut master, &handshake);
 
+    // The session answers file-data requests itself, so forwarding PTY output
+    // is all the driving required.
     let mut buf = [0u8; 8192];
     let mut idle = 0;
-    let mut sent_everything = false;
-    // `rz` does not close the session on its own, so stop once the payload is
-    // fully queued and the peer has gone quiet.
+    let mut bytes_sent = 0u64;
     while !session.is_finished() && idle < IDLE_POLL_LIMIT {
         let read = match master.read(&mut buf) {
             Ok(0) => break,
@@ -370,51 +371,26 @@ fn sends_file_to_real_rz() {
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 idle += 1;
-                if sent_everything && idle > 20 {
-                    break;
-                }
                 std::thread::sleep(IDLE_POLL_INTERVAL);
                 continue;
             }
             Err(error) => panic!("PTY read failed: {error}"),
         };
 
-        let mut step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        let step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        bytes_sent += step.bytes_sent;
         if !step.to_pty.is_empty() {
             write_all_blocking(&mut master, &step.to_pty);
         }
-
-        // Answer file-data requests until the sender stops asking, mirroring
-        // what the event loop does.
-        while let Some(request) = step.file_request {
-            let start = request.offset as usize;
-            let end = (start + request.max_len).min(payload.len());
-            let reply = session
-                .submit_file(&payload[start..end])
-                .expect("submit_file");
-            if !reply.is_empty() {
-                write_all_blocking(&mut master, &reply);
-            }
-            let next = session.offer_next_file().expect("offer next");
-            if !next.is_empty() {
-                write_all_blocking(&mut master, &next);
-            }
-            // Once the last byte is queued, declare the queue closed so the
-            // sender can send ZEOF and then ZFIN; without this the session
-            // never ends and `rz` keeps waiting for another file.
-            if end >= payload.len() {
-                sent_everything = true;
-                let finish = session.finish_upload().expect("finish upload");
-                if !finish.is_empty() {
-                    write_all_blocking(&mut master, &finish);
-                }
-            }
-            step = Default::default();
-        }
     }
 
-    let _ = child.kill();
     let _ = child.wait();
+
+    assert!(
+        session.is_finished(),
+        "session must close after the transfer"
+    );
+    assert_eq!(bytes_sent, payload.len() as u64, "all bytes were offered");
 
     let landed = dest_dir.join("upload.bin");
     assert!(landed.exists(), "rz did not create the file");

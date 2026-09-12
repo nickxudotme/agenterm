@@ -226,10 +226,11 @@ fn download_consumes_real_sz_handshake_without_rendering() {
 
 #[test]
 fn upload_only_sessions_ignore_download_operations() {
-    // Guards the role split: a download must never be asked for file bytes.
+    // Guards the role split: starting an upload on a download is a no-op
+    // rather than corrupting the receiver's state.
     let mut download = ZmodemSession::new_download().expect("download session");
-    assert!(download.offer_next_file().expect("no-op").is_empty());
-    assert!(download.submit_file(b"data").expect("no-op").is_empty());
+    assert!(download.begin_upload().expect("no-op").is_empty());
+    assert_eq!(download.role(), ZmodemRole::Download);
 }
 
 #[test]

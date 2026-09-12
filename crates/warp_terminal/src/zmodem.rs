@@ -605,6 +605,7 @@ impl ZmodemSession {
             sender: Sender::new()?,
             files: files.into_iter().collect::<VecDeque<_>>(),
             current: None,
+            current_data: Vec::new(),
             finished: false,
             pending_zfile: None,
         })))
@@ -644,41 +645,14 @@ impl ZmodemSession {
         }
     }
 
-    /// Advances an upload by offering the next queued file.
+    /// Starts the upload once a receiver is ready.
     ///
-    /// Returns protocol bytes to write; a no-op once the queue is empty.
-    pub fn offer_next_file(&mut self) -> Result<Vec<u8>, ZmodemError> {
+    /// The session reads and answers file data itself, so the caller only
+    /// needs to forward the returned bytes and keep feeding PTY output.
+    pub fn begin_upload(&mut self) -> Result<Vec<u8>, ZmodemError> {
         match self {
             ZmodemSession::Download(_) => Ok(Vec::new()),
-            ZmodemSession::Upload(session) => {
-                session.offer_next_file()?;
-                session.step()
-            }
-        }
-    }
-
-    /// Supplies file data the sender asked for via [`ZmodemStep::file_request`].
-    pub fn submit_file(&mut self, data: &[u8]) -> Result<Vec<u8>, ZmodemError> {
-        match self {
-            ZmodemSession::Download(_) => Ok(Vec::new()),
-            ZmodemSession::Upload(session) => {
-                session.sender.submit_file(data)?;
-                session.step()
-            }
-        }
-    }
-
-    /// Declares that no further files will be offered, so the sender can close
-    /// the session once the queue drains.
-    pub fn finish_upload(&mut self) -> Result<Vec<u8>, ZmodemError> {
-        match self {
-            ZmodemSession::Download(_) => Ok(Vec::new()),
-            ZmodemSession::Upload(session) => {
-                if session.files.is_empty() && session.current.is_none() {
-                    session.sender.finish()?;
-                }
-                session.step()
-            }
+            ZmodemSession::Upload(session) => session.step(),
         }
     }
 
@@ -701,7 +675,11 @@ pub struct ZmodemStep {
     /// Events the protocol reported.
     pub events: Vec<OwnedEvent>,
     /// File bytes the sender must supply next.
+    ///
+    /// Only set by download sessions; uploads answer their own requests.
     pub file_request: Option<FileRequest>,
+    /// Bytes handed to the sender during this step, for upload progress.
+    pub bytes_sent: u64,
     /// Whether the session has finished, successfully or not.
     pub finished: bool,
 }
@@ -831,6 +809,12 @@ pub struct UploadSession {
     sender: Sender,
     files: VecDeque<UploadFile>,
     current: Option<UploadFile>,
+    /// Contents of the file being sent, so `ReadFile` is answered inline.
+    ///
+    /// `zmodem2` requires `submit_file` to be followed immediately by more
+    /// polling, so the data has to be on hand rather than fetched by the
+    /// caller between steps.
+    current_data: Vec<u8>,
     finished: bool,
     /// ZFILE frame to emit once the receiver has introduced itself.
     ///
@@ -841,9 +825,9 @@ pub struct UploadSession {
 
 impl UploadSession {
     fn step(&mut self) -> Result<Vec<u8>, ZmodemError> {
-        let mut sink = PtySink::new();
         let mut step = ZmodemStep::default();
-        self.drain(&mut step, &mut sink)?;
+        let mut sink = PtySink::new();
+        self.drive(&mut step, &mut sink)?;
         Ok(sink.take())
     }
 
@@ -852,25 +836,13 @@ impl UploadSession {
         let mut consumed = 0usize;
         let mut sink = PtySink::new();
 
-        // Mirrors the receiver: the sender stops accepting input while it has
-        // work pending, so input and draining must interleave or the tail of
-        // the buffer is lost.
         loop {
             let before = consumed;
             if consumed < bytes.len() {
                 consumed += self.sender.submit_wire(&bytes[consumed..])?;
             }
-
-            // `start_file` only records the file while the sender is still
-            // waiting for ZRINIT; the ZFILE frame is emitted once the receiver
-            // has introduced itself. Retrying here is what gets it sent.
-            self.offer_next_file()?;
-
-            let drained = self.drain(&mut step, &mut sink)?;
-
-            // A pending file request needs the caller to supply data, so stop
-            // here rather than polling it again in a tight loop.
-            if step.file_request.is_some() || (consumed == before && !drained) {
+            let progressed = self.drive(&mut step, &mut sink)?;
+            if consumed == before && !progressed {
                 break;
             }
         }
@@ -879,10 +851,21 @@ impl UploadSession {
         Ok(step)
     }
 
-    /// Drains pending sender actions, returning whether anything was produced.
-    fn drain(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
+    /// Drives the sender, handling one action per poll.
+    ///
+    /// `zmodem2` expects each action to be resolved before the next poll, and
+    /// in particular expects `submit_file` to be followed immediately by more
+    /// polling so the data frame reaches the wire. Batching actions instead
+    /// leaves the transfer stalled with ZEOF unsent.
+    fn drive(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
         let mut progressed = false;
+
         loop {
+            // Offer the next file whenever the sender is between files. While
+            // it still awaits ZRINIT this only records the file; the frame
+            // goes out once the receiver has introduced itself.
+            self.offer_next_file()?;
+
             match self.sender.poll() {
                 Action::WriteWire(to_write) => {
                     let len = to_write.len();
@@ -902,17 +885,26 @@ impl UploadSession {
                     progressed = true;
                 }
                 Action::ReadFile { offset, max_len } => {
-                    step.file_request = Some(FileRequest {
-                        offset: offset.get(),
-                        max_len,
-                    });
-                    // The caller owns file I/O, so stop and let it supply data.
-                    return Ok(true);
+                    let start = offset.get() as usize;
+                    if start >= self.current_data.len() {
+                        // Nothing left to send; the sender emits ZEOF next.
+                        return Ok(progressed);
+                    }
+                    let end = start.saturating_add(max_len).min(self.current_data.len());
+                    let chunk = self.current_data[start..end].to_vec();
+                    self.sender.submit_file(&chunk)?;
+                    step.bytes_sent += (end - start) as u64;
+                    progressed = true;
                 }
                 Action::Event(event) => {
                     let owned = own_event(event);
                     if matches!(owned, OwnedEvent::FileCompleted) {
                         self.current = None;
+                        self.current_data.clear();
+                        // No more files means the session can close.
+                        if self.files.is_empty() {
+                            self.sender.finish()?;
+                        }
                     }
                     if matches!(owned, OwnedEvent::SessionCompleted | OwnedEvent::Aborted) {
                         step.finished = true;
@@ -921,13 +913,14 @@ impl UploadSession {
                     step.events.push(owned);
                     progressed = true;
                 }
-                _ => break,
+                // `Action` is `#[non_exhaustive]`; unknown variants cannot be
+                // handled meaningfully, so stop rather than spin.
+                _ => return Ok(progressed),
             }
         }
-        Ok(progressed)
     }
 
-    /// Offers the next queued file once the sender is ready for one.
+    /// Offers the next queued file, loading its contents.
     fn offer_next_file(&mut self) -> Result<(), ZmodemError> {
         if self.current.is_some() {
             return Ok(());
@@ -935,10 +928,22 @@ impl UploadSession {
         let Some(file) = self.files.pop_front() else {
             return Ok(());
         };
+
+        // An unreadable file is skipped rather than failing the whole session,
+        // which would abandon files that are still fine.
+        let data = match std::fs::read(&file.path) {
+            Ok(data) => data,
+            Err(error) => {
+                log::warn!("Skipping unreadable ZMODEM upload file: {error}");
+                return Ok(());
+            }
+        };
+
         self.sender
             .start_file(FileInfo::new(&file.name, Some(Position::new(file.size))))?;
         // Queue our own frame; `zmodem2`'s is missing metadata `rz` needs.
         self.pending_zfile = Some(zfile_frame(&file.name, file.size, &file.mtime_octal()));
+        self.current_data = data;
         self.current = Some(file);
         Ok(())
     }
