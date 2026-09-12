@@ -39,12 +39,20 @@ const MAX_LOCKED_READ: usize = 0x1_0000;
 /// slow enough that a high-throughput transfer does not flood the parser.
 const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long a transfer may make no progress before it is abandoned.
+///
+/// An active session owns the byte stream, so a peer that stops responding
+/// would otherwise leave the terminal unusable with no way out.
+const PROGRESS_STALL_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Status-line state for the transfer being rendered into the terminal.
 #[derive(Default)]
 struct ZmodemStatus {
     progress: TransferProgress,
     /// When the status line was last drawn, used to throttle refreshes.
     last_render: Option<Instant>,
+    /// When the transfer last advanced, used to abandon a stalled peer.
+    last_progress: Option<Instant>,
 }
 
 impl ZmodemStatus {
@@ -205,6 +213,31 @@ fn route_zmodem(
         // output is all that is needed to advance either direction.
         let step = session.submit_wire(bytes);
         let role = session.role();
+
+        // A session owns the stream, so a peer that goes silent must not cost
+        // the user their terminal: give up and hand the bytes back.
+        let advanced = step.as_ref().is_ok_and(|step| {
+            !step.to_pty.is_empty()
+                || step.file_data.is_some()
+                || !step.events.is_empty()
+                || step.bytes_sent > 0
+        });
+        if advanced {
+            status.last_progress = Some(Instant::now());
+        } else if status
+            .last_progress
+            .is_some_and(|at| at.elapsed() >= PROGRESS_STALL_TIMEOUT)
+        {
+            log::warn!("Abandoning stalled ZMODEM transfer; returning the terminal");
+            let summary = status.progress.render_summary(role, Some("no response"));
+            let mut abort = session.abort();
+            end_zmodem(active, detector, listener, Some("No response".to_owned()));
+            // Tell the peer to stop, then render the outcome.
+            state
+                .write_list
+                .push_back(Cow::Owned(std::mem::take(&mut abort)));
+            return summary;
+        }
         return finish_zmodem_step(step, active, detector, status, role, listener, state)
             .unwrap_or_default();
     }
@@ -216,9 +249,19 @@ fn route_zmodem(
             render_before,
             protocol,
         } => {
-            // Only `sz` (which opens with ZRQINIT or ZFILE) starts a download
-            // automatically. A ZRINIT means the remote is running `rz` and is
-            // waiting for us to send, which only an explicit upload starts.
+            // A ZRINIT means the remote is running `rz`: it has announced it
+            // is ready and will wait, so ask the user which files to send
+            // rather than requiring them to know to start an upload first.
+            if header.frame == Frame::Zrinit {
+                log::info!("ZMODEM upload requested by remote rz");
+                listener.send_terminal_event(TerminalEvent::ZmodemUploadRequested);
+                // Hold the protocol bytes back: `rz` repeats its handshake, so
+                // the session picks up when the file choice arrives.
+                detector.reset();
+                return render_before;
+            }
+
+            // Only `sz`, which opens with ZRQINIT or ZFILE, starts a download.
             if !matches!(header.frame, Frame::Zrqinit | Frame::Zfile) {
                 return render_before;
             }
@@ -235,7 +278,10 @@ fn route_zmodem(
                     let reply = session.submit_wire(&protocol);
                     let role = session.role();
                     detector.reset();
-                    *status = ZmodemStatus::default();
+                    *status = ZmodemStatus {
+                        last_progress: Some(Instant::now()),
+                        ..Default::default()
+                    };
                     *active = Some(session);
 
                     let mut rendered = render_before.clone();
@@ -566,6 +612,8 @@ where
             files.push(UploadFile { path, name, size });
         }
 
+        log::info!("ZMODEM upload requested: {} readable file(s)", files.len());
+
         if files.is_empty() {
             self.event_listener
                 .send_terminal_event(TerminalEvent::ZmodemFinished {
@@ -596,9 +644,13 @@ where
             }
         }
 
+        log::info!("ZMODEM upload session started");
         self.zmodem = Some(session);
         self.zmodem_detector.reset();
-        self.zmodem_status = ZmodemStatus::default();
+        self.zmodem_status = ZmodemStatus {
+            last_progress: Some(Instant::now()),
+            ..Default::default()
+        };
     }
 
     #[inline]

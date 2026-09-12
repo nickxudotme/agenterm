@@ -169,6 +169,10 @@ pub enum Event {
     ZmodemDownloadStarted {
         file_name: Option<String>,
     },
+    /// A remote `rz` is waiting for files, so the user should be asked which
+    /// ones to send. Detected from the receiver's own handshake, because `rz`
+    /// never initiates: it announces readiness and waits.
+    ZmodemUploadRequested,
     /// Progress for the in-flight ZMODEM transfer.
     ZmodemProgress {
         file_name: String,

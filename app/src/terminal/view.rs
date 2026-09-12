@@ -13071,6 +13071,12 @@ impl TerminalView {
             ModelEvent::ZmodemDownloadStarted { .. } => {
                 log::info!("ZMODEM download started");
             }
+            ModelEvent::ZmodemUploadRequested => {
+                // `rz` is already waiting, so prompt right away; requiring a
+                // menu action first means the user must know to run it before
+                // the command they just typed.
+                self.send_files_with_zmodem(ctx);
+            }
             ModelEvent::ZmodemProgress {
                 file_name,
                 bytes_transferred,
@@ -26452,6 +26458,29 @@ impl TerminalView {
         }
     }
 
+    /// Prompts for local files and starts a ZMODEM upload.
+    ///
+    /// `rz` announces that it is ready and then waits, so this is triggered
+    /// both by detecting that handshake and by the menu entry.
+    fn send_files_with_zmodem(&mut self, ctx: &mut ViewContext<Self>) {
+        let config = FilePickerConfiguration::new().allow_multi_select();
+        ctx.open_file_picker(
+            move |result, ctx: &mut ViewContext<Self>| match result {
+                Ok(paths) if !paths.is_empty() => {
+                    let paths: Vec<std::path::PathBuf> =
+                        paths.into_iter().map(std::path::PathBuf::from).collect();
+                    log::info!("ZMODEM upload chosen: {} path(s)", paths.len());
+                    ctx.emit(Event::StartZmodemUpload { paths });
+                }
+                Ok(_) => log::info!("ZMODEM upload cancelled by the user"),
+                Err(error) => {
+                    log::warn!("Could not choose files for ZMODEM upload: {error}");
+                }
+            },
+            config,
+        );
+    }
+
     pub fn initiate_ssh_file_upload(&self, paths: &[String], ctx: &mut ViewContext<Self>) {
         let remote_pwd = self.pwd();
         if let Some(ssh_connection_info) = self.ssh_session_info(ctx) {
@@ -27845,25 +27874,7 @@ impl TypedActionView for TerminalView {
                     )
                 });
             }
-            SendFilesWithZmodem => {
-                // `rz` must already be running on the remote end; it waits for
-                // the sender, so the picker is the only trigger we can offer.
-                let config = FilePickerConfiguration::new().allow_multi_select();
-                ctx.open_file_picker(
-                    move |result, ctx: &mut ViewContext<Self>| match result {
-                        Ok(paths) if !paths.is_empty() => {
-                            let paths: Vec<std::path::PathBuf> =
-                                paths.into_iter().map(std::path::PathBuf::from).collect();
-                            ctx.emit(Event::StartZmodemUpload { paths });
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            log::warn!("Could not choose files for ZMODEM upload: {error}");
-                        }
-                    },
-                    config,
-                );
-            }
+            SendFilesWithZmodem => self.send_files_with_zmodem(ctx),
             StartFileDropTarget => {
                 let Some(session) = self
                     .active_block_session_id()

@@ -140,6 +140,8 @@ pub enum Event {
     ZmodemDownloadStarted {
         file_name: Option<String>,
     },
+    /// A remote `rz` is waiting for files to be sent.
+    ZmodemUploadRequested,
     /// Progress for the in-flight ZMODEM transfer.
     ZmodemProgress {
         file_name: String,
@@ -198,6 +200,7 @@ impl From<warp_terminal::event::Event> for Event {
             warp_terminal::event::Event::ZmodemDownloadStarted { file_name } => {
                 Self::ZmodemDownloadStarted { file_name }
             }
+            warp_terminal::event::Event::ZmodemUploadRequested => Self::ZmodemUploadRequested,
             warp_terminal::event::Event::ZmodemProgress {
                 file_name,
                 bytes_transferred,
@@ -528,6 +531,7 @@ impl Debug for Event {
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
             Event::ZmodemDownloadStarted { .. } => write!(f, "ZmodemDownloadStarted"),
+            Event::ZmodemUploadRequested => write!(f, "ZmodemUploadRequested"),
             Event::ZmodemProgress { file_name, .. } => {
                 write!(f, "ZmodemProgress({file_name})")
             }

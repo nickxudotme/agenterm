@@ -280,6 +280,7 @@ impl ModelEventDispatcher {
             Event::ZmodemDownloadStarted { file_name } => {
                 ModelEvent::ZmodemDownloadStarted { file_name }
             }
+            Event::ZmodemUploadRequested => ModelEvent::ZmodemUploadRequested,
             Event::ZmodemProgress {
                 file_name,
                 bytes_transferred,
@@ -507,6 +508,8 @@ pub enum ModelEvent {
     ZmodemDownloadStarted {
         file_name: Option<String>,
     },
+    /// A remote `rz` is waiting for files to be sent.
+    ZmodemUploadRequested,
     /// Progress for the in-flight ZMODEM transfer.
     ZmodemProgress {
         file_name: String,

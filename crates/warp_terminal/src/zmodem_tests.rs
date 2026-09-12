@@ -475,3 +475,73 @@ fn escape_table_covers_the_control_bytes_zmodem_reserves() {
         assert!(!needs_escape(*byte), "{byte:#02x} must not be escaped");
     }
 }
+
+#[test]
+fn upload_offers_the_queued_file_before_any_wire_input() {
+    // The event loop calls `begin_upload` immediately after constructing the
+    // session, before `rz` has said anything. That call must already queue the
+    // file, or the transfer reports a completed zero-byte send.
+    let dir = std::env::temp_dir().join(format!("zmodem-offer-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("queued.txt");
+    std::fs::write(&path, b"payload").expect("write file");
+
+    let files = vec![UploadFile {
+        path: path.clone(),
+        name: b"queued.txt".to_vec(),
+        size: 7,
+    }];
+    let mut session = ZmodemSession::new_upload(files).expect("upload session");
+    let initial = session.begin_upload().expect("begin upload");
+
+    // The handshake goes out first; the file is offered once ZRINIT lands.
+    assert!(!initial.is_empty(), "handshake must be sent");
+    assert!(
+        !session.is_finished(),
+        "session must not end before sending"
+    );
+
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir(&dir).ok();
+}
+
+#[test]
+fn upload_with_no_readable_files_does_not_claim_success() {
+    // A queue whose files vanished must not report a completed transfer.
+    let files = vec![UploadFile {
+        path: PathBuf::from("/definitely/missing/file.bin"),
+        name: b"file.bin".to_vec(),
+        size: 10,
+    }];
+    let mut session = ZmodemSession::new_upload(files).expect("upload session");
+    let _ = session.begin_upload().expect("begin upload");
+    assert!(
+        !session.is_finished(),
+        "an unreadable queue must not look like a finished send"
+    );
+}
+
+#[test]
+fn zrinit_is_not_mistaken_for_a_download() {
+    // `rz` opens with ZRINIT. Treating it as a download would take over the
+    // stream and answer a sender that does not exist.
+    let mut detector = ZmodemDetector::new();
+    let zrinit = encode_hex_header(Frame::Zrinit, &[0, 0, 0, 0x23]);
+    let (header, _, _) = started(detector.push(&zrinit));
+    assert_eq!(header.frame, Frame::Zrinit);
+    assert_ne!(
+        header.frame,
+        Frame::Zrqinit,
+        "ZRINIT and ZRQINIT must stay distinguishable"
+    );
+}
+
+#[test]
+fn detects_the_zrinit_real_rz_sends() {
+    // Captured from `rz --binary`: nonstop buffer with CANFDX|CANOVIO|CANFC32.
+    let mut detector = ZmodemDetector::new();
+    let (header, _, _) = started(detector.push(b"**\x18B0100000023be50\r\x8a\x11"));
+    assert_eq!(header.frame, Frame::Zrinit);
+    // Flags say the receiver can stream without per-buffer acknowledgement.
+    assert_eq!(header.flags[3], 0x23);
+}
