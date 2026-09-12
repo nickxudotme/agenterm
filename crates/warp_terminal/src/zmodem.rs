@@ -418,6 +418,77 @@ impl ZmodemDetector {
     }
 }
 
+/// Progress of a transfer, rendered into the terminal so the block keeps a
+/// record of what was sent or received.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub file_name: String,
+    pub bytes_transferred: u64,
+    /// Total size advertised by the sender; zero when it is unknown.
+    pub bytes_total: u64,
+}
+
+impl TransferProgress {
+    /// Renders the in-place status line.
+    ///
+    /// Starts with a carriage return and ends without a newline so successive
+    /// updates overwrite each other instead of scrolling the block.
+    pub fn render_line(&self, role: ZmodemRole) -> Vec<u8> {
+        let mut line = format!(
+            "\r{} {}  {}",
+            role.label(),
+            self.file_name,
+            format_bytes(self.bytes_transferred)
+        );
+        if self.bytes_total > 0 {
+            line.push_str(&format!(
+                " / {}  {}%",
+                format_bytes(self.bytes_total),
+                self.percent()
+            ));
+        }
+        // Clear to end of line so a shorter update cannot leave stale digits.
+        line.push_str("\x1b[K");
+        line.into_bytes()
+    }
+
+    /// Renders the final summary line, which stays in the block's scrollback.
+    pub fn render_summary(&self, role: ZmodemRole, error: Option<&str>) -> Vec<u8> {
+        let outcome = match error {
+            Some(message) => format!("failed: {message}"),
+            None => format!("{} complete", format_bytes(self.bytes_transferred)),
+        };
+        format!(
+            "\r{} {}  {}\x1b[K\r\n",
+            role.label(),
+            self.file_name,
+            outcome
+        )
+        .into_bytes()
+    }
+
+    fn percent(&self) -> u64 {
+        if self.bytes_total == 0 {
+            return 0;
+        }
+        // Saturate rather than exceed 100 if a sender over-delivers.
+        (self.bytes_transferred.saturating_mul(100) / self.bytes_total).min(100)
+    }
+}
+
+/// Formats a byte count for display, in the units a person would use.
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    match bytes {
+        b if b >= GIB => format!("{:.1} GiB", b as f64 / GIB as f64),
+        b if b >= MIB => format!("{:.1} MiB", b as f64 / MIB as f64),
+        b if b >= KIB => format!("{:.1} KiB", b as f64 / KIB as f64),
+        b => format!("{b} B"),
+    }
+}
+
 /// Which side of the transfer the terminal plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZmodemRole {
@@ -425,6 +496,16 @@ pub enum ZmodemRole {
     Download,
     /// The remote runs `rz`; we read files from disk.
     Upload,
+}
+
+impl ZmodemRole {
+    /// Short prefix identifying the direction in the status line.
+    fn label(self) -> &'static str {
+        match self {
+            ZmodemRole::Download => "sz <<",
+            ZmodemRole::Upload => "rz >>",
+        }
+    }
 }
 
 /// A file queued for upload.

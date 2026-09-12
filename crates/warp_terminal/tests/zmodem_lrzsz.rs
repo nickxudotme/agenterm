@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use command::blocking::Command;
-use warp_terminal::zmodem::{OwnedEvent, ZmodemSession};
+use warp_terminal::zmodem::{OwnedEvent, TransferProgress, ZmodemRole, ZmodemSession};
 
 /// How long to wait between polls once the peer stops sending.
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -175,4 +175,100 @@ fn receives_file_when_the_pty_fragments_every_byte() {
     let (received, name) = receive_with_sz_chunked(&path, 1);
     assert_eq!(name, "fragmented.txt");
     assert_eq!(received, payload);
+}
+
+#[test]
+fn renders_progress_and_summary_for_a_real_transfer() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("progress.bin");
+    let payload: Vec<u8> = (0..16384u32).map(|index| (index % 251) as u8).collect();
+    std::fs::write(&path, &payload).expect("write source");
+
+    // Replays what the event loop renders: the advertised size arrives with
+    // the file, and byte counts accumulate as subpackets land.
+    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let mut child = Command::new("sz")
+        .arg("--zmodem")
+        .arg("--binary")
+        .arg(&path)
+        // SAFETY: descriptors are duplicated so parent and child each own one.
+        .stdin(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stdout(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sz");
+    // SAFETY: the child holds its own duplicated descriptors.
+    unsafe { libc::close(pty.slave) };
+    // SAFETY: `master` is a descriptor this test exclusively owns.
+    let mut master: File = unsafe { File::from_raw_fd(pty.master) };
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+    let mut session = ZmodemSession::new_download().expect("download session");
+    let mut progress = TransferProgress::default();
+    let mut status_lines = Vec::new();
+    let handshake = session.initial_output().expect("initial output");
+    master.write_all(&handshake).expect("write handshake");
+
+    let mut buf = [0u8; 8192];
+    let mut idle = 0;
+    while !session.is_finished() && idle < IDLE_POLL_LIMIT {
+        let read = match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                idle = 0;
+                n
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                idle += 1;
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => panic!("PTY read failed: {error}"),
+        };
+
+        let step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        if !step.to_pty.is_empty() {
+            master.write_all(&step.to_pty).expect("write reply");
+        }
+        if let Some(chunk) = &step.file_data {
+            progress.bytes_transferred += chunk.data.len() as u64;
+            status_lines.push(progress.render_line(ZmodemRole::Download));
+        }
+        for event in step.events {
+            match event {
+                OwnedEvent::FileStarted { name, size } => {
+                    progress.file_name = name;
+                    progress.bytes_total = size.map(u64::from).unwrap_or(0);
+                }
+                OwnedEvent::FileCompleted => {
+                    status_lines.push(progress.render_summary(ZmodemRole::Download, None));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(
+        progress.bytes_total,
+        payload.len() as u64,
+        "size advertised"
+    );
+    assert_eq!(progress.bytes_transferred, payload.len() as u64);
+    assert!(
+        status_lines.len() > 1,
+        "a multi-subpacket transfer must report progress more than once"
+    );
+
+    let summary = String::from_utf8(status_lines.last().unwrap().clone()).expect("utf8");
+    assert!(summary.contains("progress.bin"), "summary names the file");
+    assert!(summary.contains("16.0 KiB complete"), "got: {summary}");
+    assert!(summary.ends_with("\r\n"), "summary stays in scrollback");
 }

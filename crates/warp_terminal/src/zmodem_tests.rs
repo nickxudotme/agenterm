@@ -319,3 +319,96 @@ fn holds_back_bytes_exactly_once_across_reads() {
         "held bytes must render once, in order"
     );
 }
+
+#[test]
+fn formats_byte_counts_in_human_units() {
+    assert_eq!(format_bytes(0), "0 B");
+    assert_eq!(format_bytes(999), "999 B");
+    assert_eq!(format_bytes(1024), "1.0 KiB");
+    assert_eq!(format_bytes(1536), "1.5 KiB");
+    assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
+    assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
+}
+
+#[test]
+fn progress_line_overwrites_itself_without_scrolling() {
+    let progress = TransferProgress {
+        file_name: "a.bin".to_owned(),
+        bytes_transferred: 512,
+        bytes_total: 2048,
+    };
+    let line = progress.render_line(ZmodemRole::Download);
+    let text = String::from_utf8(line).expect("utf8");
+
+    // A leading CR and no trailing newline keep successive updates on one row.
+    assert!(text.starts_with('\r'), "must return to column zero");
+    assert!(!text.ends_with('\n'), "must not scroll the block");
+    // Clearing to end of line prevents a shorter update leaving stale digits.
+    assert!(text.ends_with("\x1b[K"));
+    assert!(text.contains("a.bin"));
+    assert!(text.contains("512 B"));
+    assert!(text.contains("2.0 KiB"));
+    assert!(text.contains("25%"));
+}
+
+#[test]
+fn progress_line_omits_percentage_when_size_is_unknown() {
+    let progress = TransferProgress {
+        file_name: "stream.bin".to_owned(),
+        bytes_transferred: 100,
+        bytes_total: 0,
+    };
+    let text = String::from_utf8(progress.render_line(ZmodemRole::Download)).expect("utf8");
+    assert!(text.contains("100 B"));
+    assert!(
+        !text.contains('%'),
+        "percentage is meaningless without a total"
+    );
+}
+
+#[test]
+fn progress_percentage_saturates_at_one_hundred() {
+    let progress = TransferProgress {
+        file_name: "over.bin".to_owned(),
+        // A sender that over-delivers must not report above 100%.
+        bytes_transferred: 300,
+        bytes_total: 100,
+    };
+    assert_eq!(progress.percent(), 100);
+}
+
+#[test]
+fn summary_line_ends_the_row_so_it_stays_in_scrollback() {
+    let progress = TransferProgress {
+        file_name: "done.bin".to_owned(),
+        bytes_transferred: 2048,
+        bytes_total: 2048,
+    };
+    let text =
+        String::from_utf8(progress.render_summary(ZmodemRole::Download, None)).expect("utf8");
+    assert!(text.contains("done.bin"));
+    assert!(text.contains("2.0 KiB complete"));
+    assert!(
+        text.ends_with("\r\n"),
+        "summary must persist on its own row"
+    );
+}
+
+#[test]
+fn summary_line_reports_failure_reason() {
+    let progress = TransferProgress {
+        file_name: "broken.bin".to_owned(),
+        bytes_transferred: 10,
+        bytes_total: 100,
+    };
+    let text = String::from_utf8(progress.render_summary(ZmodemRole::Upload, Some("cancelled")))
+        .expect("utf8");
+    assert!(text.contains("rz >>"));
+    assert!(text.contains("failed: cancelled"));
+}
+
+#[test]
+fn role_labels_distinguish_direction() {
+    assert_eq!(ZmodemRole::Download.label(), "sz <<");
+    assert_eq!(ZmodemRole::Upload.label(), "rz >>");
+}

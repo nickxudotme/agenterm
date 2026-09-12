@@ -10,7 +10,9 @@ use std::marker::Send;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
+use instant::Instant;
 use log::error;
 use mio::{self, Events, Interest};
 use parking_lot::{FairMutex, FairMutexGuard};
@@ -22,8 +24,8 @@ use crate::local_tty;
 use crate::model::ansi;
 use crate::writeable_pty::Message;
 use crate::zmodem::{
-    DetectorOutcome, FileRequest, Frame, OwnedEvent, UploadFile, ZmodemDetector, ZmodemError,
-    ZmodemSession, ZmodemStep,
+    DetectorOutcome, FileRequest, Frame, OwnedEvent, TransferProgress, UploadFile, ZmodemDetector,
+    ZmodemError, ZmodemRole, ZmodemSession, ZmodemStep,
 };
 
 /// The size of the buffer to read data into from the PTY.
@@ -32,6 +34,32 @@ const READ_BUFFER_SIZE: usize = 0x4_0000;
 /// Max bytes to process from the PTY while holding the lock before giving
 /// someone else an opportunity to lock it.
 const MAX_LOCKED_READ: usize = 0x1_0000;
+
+/// How often the ZMODEM status line is refreshed. Fast enough to look live,
+/// slow enough that a high-throughput transfer does not flood the parser.
+const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Status-line state for the transfer being rendered into the terminal.
+#[derive(Default)]
+struct ZmodemStatus {
+    progress: TransferProgress,
+    /// When the status line was last drawn, used to throttle refreshes.
+    last_render: Option<Instant>,
+}
+
+impl ZmodemStatus {
+    /// Whether enough time has passed to redraw the status line.
+    fn should_refresh(&self) -> bool {
+        self.last_render
+            .is_none_or(|at| at.elapsed() >= PROGRESS_RENDER_INTERVAL)
+    }
+
+    /// Draws the status line and records when it happened.
+    fn refresh(&mut self, role: ZmodemRole) -> Vec<u8> {
+        self.last_render = Some(Instant::now());
+        self.progress.render_line(role)
+    }
+}
 
 pub const CHANNEL_TOKEN: mio::Token = mio::Token(0);
 pub const PTY_TOKEN: mio::Token = mio::Token(1);
@@ -62,6 +90,9 @@ pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
 
     /// File contents for an in-flight upload, in the order they are offered.
     upload_contents: Vec<Vec<u8>>,
+
+    /// Rendering state for the in-flight transfer.
+    zmodem_status: ZmodemStatus,
 
     /// The event listener is available to the PTY event loop
     /// to emit relevant events to subscribers. The ansi handler
@@ -182,6 +213,7 @@ fn route_zmodem(
     detector: &mut ZmodemDetector,
     active: &mut Option<ZmodemSession>,
     contents: &[Vec<u8>],
+    status: &mut ZmodemStatus,
     listener: &ChannelEventListener,
     bytes: &[u8],
     state: &mut State,
@@ -211,7 +243,9 @@ fn route_zmodem(
             });
         }
 
-        return finish_zmodem_step(step, active, detector, listener, state).unwrap_or_default();
+        let role = session.role();
+        return finish_zmodem_step(step, active, detector, status, role, listener, state)
+            .unwrap_or_default();
     }
 
     match detector.push(bytes) {
@@ -238,10 +272,18 @@ fn route_zmodem(
                         file_name: None,
                     });
                     let reply = session.submit_wire(&protocol);
+                    let role = session.role();
                     detector.reset();
+                    *status = ZmodemStatus::default();
                     *active = Some(session);
-                    finish_zmodem_step(reply, active, detector, listener, state)
-                        .unwrap_or_else(|| render_before.clone())
+
+                    let mut rendered = render_before.clone();
+                    if let Some(line) =
+                        finish_zmodem_step(reply, active, detector, status, role, listener, state)
+                    {
+                        rendered.extend_from_slice(&line);
+                    }
+                    rendered
                 }
                 Err(error) => {
                     log::warn!("Failed to start ZMODEM download: {error}");
@@ -259,10 +301,13 @@ fn route_zmodem(
 
 /// Applies one protocol step: queues PTY replies, reports progress, and ends
 /// the transfer once it is done.
+#[allow(clippy::too_many_arguments)]
 fn finish_zmodem_step(
     result: Result<ZmodemStep, ZmodemError>,
     active: &mut Option<ZmodemSession>,
     detector: &mut ZmodemDetector,
+    status: &mut ZmodemStatus,
+    role: ZmodemRole,
     listener: &ChannelEventListener,
     state: &mut State,
 ) -> Option<Vec<u8>> {
@@ -270,8 +315,11 @@ fn finish_zmodem_step(
         Ok(step) => step,
         Err(error) => {
             log::warn!("ZMODEM transfer failed: {error}");
+            let summary = status
+                .progress
+                .render_summary(role, Some(&error.to_string()));
             end_zmodem(active, detector, listener, Some(error.to_string()));
-            return None;
+            return Some(summary);
         }
     };
 
@@ -282,9 +330,12 @@ fn finish_zmodem_step(
         log::info!("ZMODEM step produced no reply bytes");
     }
 
+    let mut rendered = Vec::new();
+
     if let Some(chunk) = &step.file_data
         && !chunk.data.is_empty()
     {
+        status.progress.bytes_transferred += chunk.data.len() as u64;
         listener.send_terminal_event(TerminalEvent::ZmodemFileData {
             name: chunk.name.clone(),
             data: chunk.data.clone(),
@@ -294,37 +345,53 @@ fn finish_zmodem_step(
     for event in &step.events {
         match event {
             OwnedEvent::FileStarted { name, size } => {
+                status.progress.file_name = name.clone();
+                status.progress.bytes_transferred = 0;
+                status.progress.bytes_total = size.map(u64::from).unwrap_or(0);
+                // Show the file immediately; waiting for the first throttled
+                // tick would leave the block blank as a transfer starts.
+                rendered.extend_from_slice(&status.refresh(role));
                 listener.send_terminal_event(TerminalEvent::ZmodemProgress {
                     file_name: name.clone(),
                     bytes_transferred: 0,
-                    bytes_total: size.map(u64::from).unwrap_or(0),
+                    bytes_total: status.progress.bytes_total,
                 });
             }
             OwnedEvent::FileCompleted => {
+                rendered.extend_from_slice(&status.progress.render_summary(role, None));
+                status.last_render = None;
                 listener.send_terminal_event(TerminalEvent::ZmodemFileCompleted {
-                    file_name: String::new(),
+                    file_name: status.progress.file_name.clone(),
                 });
             }
             OwnedEvent::SessionCompleted => {
                 end_zmodem(active, detector, listener, None);
-                return Some(Vec::new());
+                return Some(rendered);
             }
             OwnedEvent::Aborted => {
+                rendered
+                    .extend_from_slice(&status.progress.render_summary(role, Some("cancelled")));
                 end_zmodem(
                     active,
                     detector,
                     listener,
                     Some("Transfer cancelled".to_owned()),
                 );
-                return Some(Vec::new());
+                return Some(rendered);
             }
         }
+    }
+
+    // Refresh the status line at a readable rate rather than once per
+    // subpacket, which would flood the parser on a fast transfer.
+    if rendered.is_empty() && step.file_data.is_some() && status.should_refresh() {
+        rendered.extend_from_slice(&status.refresh(role));
     }
 
     if step.finished {
         end_zmodem(active, detector, listener, None);
     }
-    Some(Vec::new())
+    Some(rendered)
 }
 
 /// Tears down the active transfer and hands the stream back to the parser.
@@ -361,6 +428,7 @@ where
             zmodem_detector: ZmodemDetector::new(),
             zmodem: None,
             upload_contents: Vec::new(),
+            zmodem_status: ZmodemStatus::default(),
             event_listener,
         }
     }
@@ -465,6 +533,7 @@ where
                 &mut self.zmodem_detector,
                 &mut self.zmodem,
                 &self.upload_contents,
+                &mut self.zmodem_status,
                 &self.event_listener,
                 &buf[..bytes_in_buffer],
                 state,
