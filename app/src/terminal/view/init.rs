@@ -620,6 +620,7 @@ pub fn init(app: &mut AppContext) {
             "Send files to remote (rz)",
             TerminalAction::SendFilesWithZmodem,
         )
+        .with_custom_action(CustomAction::SendFilesWithZmodem)
         .with_context_predicate(id!("Terminal")),
     ]);
 
