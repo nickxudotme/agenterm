@@ -77,8 +77,11 @@ jobs:
         run: |
           set -euo pipefail
           ZIP="dist/Agenterm-${VERSION}-arm64.zip"
+          DMG="dist/Agenterm-${VERSION}-arm64.dmg"
           SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+          DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
           echo "SHA256=$SHA256" >> "$GITHUB_ENV"
           {
             echo "## Agenterm ${VERSION}"
@@ -92,10 +95,16 @@ jobs:
               git log --pretty='- %s' "${PREVIOUS_TAG}..HEAD"
               echo
             fi
-            echo "SHA-256:"
+            echo "ZIP SHA-256:"
             echo
             echo '```'
             echo "$SHA256"
+            echo '```'
+            echo
+            echo "DMG SHA-256:"
+            echo
+            echo '```'
+            echo "$DMG_SHA256"
             echo '```'
           } > release-notes.md
 
@@ -112,9 +121,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" "$DMG" "$DMG.sha256" --clobber
           else
-            gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" "$DMG" "$DMG.sha256" \
               --title "Agenterm ${VERSION}" \
               --notes-file release-notes.md
           fi

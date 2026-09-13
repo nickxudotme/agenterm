@@ -22,6 +22,9 @@ DIST_DIR="$REPO_ROOT/dist"
 ARCHIVE_NAME="Agenterm-$VERSION-arm64.zip"
 ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
 CHECKSUM_PATH="$ARCHIVE_PATH.sha256"
+DMG_NAME="Agenterm-$VERSION-arm64.dmg"
+DMG_PATH="$DIST_DIR/$DMG_NAME"
+DMG_CHECKSUM_PATH="$DMG_PATH.sha256"
 
 GIT_RELEASE_TAG="v$VERSION" ./script/run --release --dont-open
 
@@ -35,11 +38,16 @@ EXECUTABLE_ARCH="$(lipo -archs "$APP_PATH/Contents/MacOS/agenterm")"
 codesign --verify --deep --strict "$APP_PATH"
 
 mkdir -p "$DIST_DIR"
-rm -f "$ARCHIVE_PATH" "$CHECKSUM_PATH"
+rm -f "$ARCHIVE_PATH" "$CHECKSUM_PATH" "$DMG_PATH" "$DMG_CHECKSUM_PATH"
 ditto -c -k --keepParent "$APP_PATH" "$ARCHIVE_PATH"
+hdiutil create -volname Agenterm -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
 
 CHECKSUM="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
+DMG_CHECKSUM="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
 printf '%s  %s\n' "$CHECKSUM" "$ARCHIVE_NAME" > "$CHECKSUM_PATH"
+printf '%s  %s\n' "$DMG_CHECKSUM" "$DMG_NAME" > "$DMG_CHECKSUM_PATH"
 
 echo "Created $ARCHIVE_PATH"
 echo "SHA-256: $CHECKSUM"
+echo "Created $DMG_PATH"
+echo "SHA-256: $DMG_CHECKSUM"

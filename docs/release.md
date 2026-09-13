@@ -1,7 +1,7 @@
 # Release Agenterm
 
-Agenterm publishes an Apple Silicon zip through GitHub Releases and updates the
-`nickxudotme/homebrew-tap` cask from the same artifact.
+Agenterm publishes Apple Silicon ZIP and DMG artifacts through GitHub Releases and updates the
+`nickxudotme/homebrew-tap` cask from the ZIP artifact.
 
 ## Prerequisites
 
@@ -22,9 +22,9 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The `Release` workflow can also be started manually with a version such as `0.1.0`. It builds
-`Agenterm-0.1.0-arm64.zip`, verifies the bundle metadata and ad-hoc signature, publishes the zip
-and checksum, then updates the cask version and SHA-256.
+The `Release` workflow can also be started manually with a version such as `0.1.0`. It verifies
+the bundle metadata and ad-hoc signature, publishes versioned ZIP and DMG artifacts with their
+checksums, then updates the cask version and ZIP SHA-256.
 
 ## Local Artifact
 
@@ -32,7 +32,7 @@ and checksum, then updates the cask version and SHA-256.
 ./script/build_macos_release 0.1.0
 ```
 
-The artifact and checksum are written to `dist/`.
+The artifacts and checksums are written to `dist/`.
 
 ## Signing
 
