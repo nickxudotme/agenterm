@@ -120,7 +120,7 @@ fn action_item(name: &'static str, action: CustomAction) -> MenuItem {
     MenuItem::Custom(CustomMenuItem::new(
         name,
         dispatch_action(action),
-        no_updates,
+        action_updates(action),
         trigger_to_keystroke(&Trigger::Custom(action.into())),
     ))
 }
@@ -130,6 +130,21 @@ fn dispatch_action(action: CustomAction) -> impl Fn(&mut AppContext) + 'static {
         if let Some(window_id) = WindowManager::handle(ctx).as_ref(ctx).active_window() {
             ctx.dispatch_custom_action(action, window_id);
         }
+    }
+}
+
+fn action_updates(
+    action: CustomAction,
+) -> impl Fn(&MenuItemProperties, &mut AppContext) -> MenuItemPropertyChanges + 'static {
+    move |_, ctx| {
+        let mut changes = MenuItemPropertyChanges::default();
+        ctx.update_custom_action_binding(action.into(), |binding| {
+            changes.disabled = Some(binding.is_none());
+            if let Some(binding) = binding {
+                changes.keystroke = Some(trigger_to_keystroke(binding.trigger));
+            }
+        });
+        changes
     }
 }
 
