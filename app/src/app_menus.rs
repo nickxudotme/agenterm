@@ -66,9 +66,14 @@ fn edit_menu() -> Menu {
     Menu::new(
         "Edit",
         vec![
+            action_item("Undo", CustomAction::Undo),
+            action_item("Redo", CustomAction::Redo),
+            MenuItem::Separator,
+            action_item("Cut", CustomAction::Cut),
             action_item("Copy", CustomAction::Copy),
             action_item("Paste", CustomAction::Paste),
             action_item("Select All", CustomAction::SelectAll),
+            action_item("Clear Editor", CustomAction::ClearEditor),
             MenuItem::Separator,
             action_item("Find", CustomAction::Find),
         ],

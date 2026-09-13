@@ -4933,6 +4933,64 @@ fn test_local_workflow_persists_without_server_round_trip() {
     });
 }
 
+#[test]
+fn test_local_workflow_trash_restore_and_delete_are_persisted() {
+    App::test(ASSETS, |mut app| async move {
+        let client_id = ClientId::new();
+        initialize_app(&mut app);
+        let mut server_api = mock_server_api();
+        server_api.expect_delete_object().never();
+
+        let update_manager_struct = create_update_manager_struct(&mut app, Arc::new(server_api));
+        let update_manager = update_manager_struct.update_manager.clone();
+        create_workflow(client_id, &mut app, &update_manager);
+        db_events(&update_manager_struct);
+
+        let sync_id = SyncId::ClientId(client_id);
+        update_manager.update(&mut app, |update_manager, ctx| {
+            update_manager.trash_object(
+                CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Workflow),
+                ctx,
+            );
+        });
+
+        app.read(|ctx| {
+            let workflow = CloudModel::as_ref(ctx)
+                .get_by_uid(&sync_id.uid())
+                .expect("trashed workflow remains in the model");
+            assert!(workflow.metadata().trashed_ts.is_some());
+        });
+        assert!(!db_events(&update_manager_struct).is_empty());
+
+        update_manager.update(&mut app, |update_manager, ctx| {
+            update_manager.untrash_object(
+                CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Workflow),
+                ctx,
+            );
+        });
+        app.read(|ctx| {
+            let workflow = CloudModel::as_ref(ctx)
+                .get_by_uid(&sync_id.uid())
+                .expect("restored workflow remains in the model");
+            assert!(workflow.metadata().trashed_ts.is_none());
+        });
+        assert!(!db_events(&update_manager_struct).is_empty());
+
+        update_manager.update(&mut app, |update_manager, ctx| {
+            update_manager.delete_object_by_user(
+                CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Workflow),
+                ctx,
+            );
+        });
+        app.read(|ctx| {
+            assert!(CloudModel::as_ref(ctx).get_by_uid(&sync_id.uid()).is_none());
+        });
+        assert!(db_events(&update_manager_struct).iter().any(|event| {
+            matches!(event, ModelEvent::DeleteObjects { ids } if ids.iter().any(|(id, _)| *id == sync_id))
+        }));
+    });
+}
+
 /// Regression: a workflow created without an account must be visible in the personal space.
 ///
 /// The owner id of the local personal drive has to stay stable, because it is persisted on every

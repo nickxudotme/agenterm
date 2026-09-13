@@ -41,6 +41,7 @@ use crate::ai::blocklist::secret_redaction::find_secrets_in_text;
 use crate::appearance::Appearance;
 use crate::auth::auth_state::AuthState;
 use crate::auth::{AuthStateProvider, UserUid};
+use crate::channel::ChannelState;
 use crate::cloud_object::breadcrumbs::ContainingObject;
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::cloud_object::model::view::CloudViewModel;
@@ -1824,7 +1825,7 @@ impl WorkflowView {
     }
 
     fn is_online(&self, app: &AppContext) -> bool {
-        NetworkStatus::as_ref(app).is_online()
+        ChannelState::is_local_warp_drive() || NetworkStatus::as_ref(app).is_online()
     }
 
     /// Whether or not opening links in the desktop app is supported.
@@ -3213,7 +3214,6 @@ impl BackingView for WorkflowView {
             );
         }
 
-        // Add "Trash" to menu
         let access_level = self.access_level(ctx);
         if self.is_online(ctx)
             && (!FeatureFlag::SharedWithMe.is_enabled() || access_level.can_trash())

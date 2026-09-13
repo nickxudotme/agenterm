@@ -33,6 +33,7 @@ use super::workflow_arg_selector::{
 use super::workflow_arg_type_helpers::{self, ArgumentEditorRowIndex};
 use crate::appearance::Appearance;
 use crate::auth::UserUid;
+use crate::channel::ChannelState;
 use crate::cloud_object::breadcrumbs::{ContainingObject, ContainingObjectKind};
 use crate::cloud_object::model::persistence::{CloudModel, CloudModelEvent};
 use crate::cloud_object::{CloudObject, CloudObjectEventEntrypoint, ObjectType, Owner, Revision};
@@ -681,7 +682,6 @@ impl WorkflowModal {
                 .into_item(),
         );
 
-        // Add "Trash" to menu
         if self.is_online(app) {
             menu_items.push(
                 MenuItemFields::new("Trash")
@@ -1352,7 +1352,7 @@ impl WorkflowModal {
     }
 
     fn is_online(&self, app: &AppContext) -> bool {
-        NetworkStatus::as_ref(app).is_online()
+        ChannelState::is_local_warp_drive() || NetworkStatus::as_ref(app).is_online()
     }
 
     fn render_header_menu_and_close(&self, appearance: &Appearance) -> Box<dyn Element> {

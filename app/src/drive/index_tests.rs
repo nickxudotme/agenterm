@@ -168,6 +168,41 @@ fn test_retry_menu_item_visibility() {
 }
 
 #[test]
+fn test_local_workflow_menu_has_trash_without_share() {
+    let _channel_guard = ChannelGuard::new(Channel::Oss);
+    App::test(ASSETS, |mut app| async move {
+        initialize_app(&mut app);
+        let index = create_index(&mut app);
+        let sync_id = create_workflow(&mut app);
+        let object_id = CloudObjectTypeAndId::from_id_and_type(sync_id, ObjectType::Workflow);
+        let drive_item_id = WarpDriveItemId::Object(object_id);
+
+        index.update(&mut app, |index, ctx| {
+            let labels = index
+                .menu_items(&Space::Personal, &drive_item_id, ctx)
+                .into_iter()
+                .map(|item| label_for_menu_item(&item).to_string())
+                .collect::<Vec<_>>();
+            assert!(labels.iter().any(|label| label == "Trash"));
+            assert!(!labels.iter().any(|label| label == "Share"));
+        });
+
+        UpdateManager::handle(&app).update(&mut app, |update_manager, ctx| {
+            update_manager.trash_object(object_id, ctx);
+        });
+        index.update(&mut app, |index, ctx| {
+            let labels = index
+                .trash_menu_items(&Space::Personal, &drive_item_id, ctx)
+                .into_iter()
+                .map(|item| label_for_menu_item(&item).to_string())
+                .collect::<Vec<_>>();
+            assert!(labels.iter().any(|label| label == "Restore"));
+            assert!(labels.iter().any(|label| label == "Delete forever"));
+        });
+    })
+}
+
+#[test]
 fn test_warp_drive_navigation_states() {
     use crate::drive::index::DriveIndexAction;
     App::test((), |mut app| async move {

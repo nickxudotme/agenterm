@@ -4051,7 +4051,8 @@ impl DriveIndex {
         let WarpDriveItemId::Object(cloud_object_type_and_id) = warp_drive_item_id else {
             return menu_items;
         };
-        let can_move_or_trash = self.online_only_operation_allowed(cloud_object_type_and_id, app);
+        let can_move_or_trash = ChannelState::is_local_warp_drive()
+            || self.online_only_operation_allowed(cloud_object_type_and_id, app);
         let cloud_view_model = CloudViewModel::as_ref(app);
         let access_level = cloud_view_model.access_level(&cloud_object_type_and_id.uid(), app);
         let editability = cloud_view_model.object_editability(&cloud_object_type_and_id.uid(), app);
@@ -4149,7 +4150,7 @@ impl DriveIndex {
                             .with_icon(Icon::Link)
                             .into_item(),
                     );
-                    if editability.can_edit() {
+                    if !ChannelState::is_local_warp_drive() && editability.can_edit() {
                         menu_items.push(
                             MenuItemFields::new("Share")
                                 .with_on_select_action(DriveIndexAction::ToggleShareDialog {
@@ -4377,7 +4378,7 @@ impl DriveIndex {
                                     .into_item(),
                             );
                         }
-                        if editability.can_edit() {
+                        if !ChannelState::is_local_warp_drive() && editability.can_edit() {
                             menu_items.push(
                                 MenuItemFields::new("Share")
                                     .with_on_select_action(DriveIndexAction::ToggleShareDialog {
@@ -4518,7 +4519,9 @@ impl DriveIndex {
             }
         }
 
-        if self.online_only_operation_allowed(cloud_object_type_and_id, app) {
+        if ChannelState::is_local_warp_drive()
+            || self.online_only_operation_allowed(cloud_object_type_and_id, app)
+        {
             if !FeatureFlag::SharedWithMe.is_enabled() || access_level.can_trash() {
                 menu_items.push(
                     MenuItemFields::new("Restore")

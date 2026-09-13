@@ -3727,6 +3727,22 @@ impl UpdateManager {
     }
 
     pub fn trash_object(&mut self, id: CloudObjectTypeAndId, ctx: &mut ModelContext<Self>) {
+        if ChannelState::is_local_warp_drive() {
+            let uid = id.uid();
+            self.mark_object_trashed_and_return_timestamps(&uid, ctx);
+            CloudModel::handle(ctx).update(ctx, |cloud_model, _| {
+                if let Some(object) = cloud_model.get_mut_by_uid(&uid) {
+                    object
+                        .metadata_mut()
+                        .pending_changes_statuses
+                        .has_pending_metadata_change = false;
+                }
+                self.save_in_memory_object_to_sqlite(cloud_model, &uid);
+            });
+            ctx.notify();
+            return;
+        }
+
         // // If the object isn't known to the server yet, we can't trash it.
         let Some(server_id) = id.server_id() else {
             return;
@@ -3840,6 +3856,26 @@ impl UpdateManager {
     }
 
     pub fn untrash_object(&mut self, id: CloudObjectTypeAndId, ctx: &mut ModelContext<Self>) {
+        if ChannelState::is_local_warp_drive() {
+            let uid = id.uid();
+            CloudModel::handle(ctx).update(ctx, |cloud_model, ctx| {
+                if let Some(object) = cloud_model.get_mut_by_uid(&uid) {
+                    object.metadata_mut().trashed_ts = None;
+                    object
+                        .metadata_mut()
+                        .pending_changes_statuses
+                        .has_pending_metadata_change = false;
+                    ctx.emit(CloudModelEvent::ObjectUntrashed {
+                        type_and_id: object.cloud_object_type_and_id(),
+                        source: UpdateSource::Local,
+                    });
+                }
+                self.save_in_memory_object_to_sqlite(cloud_model, &uid);
+            });
+            ctx.notify();
+            return;
+        }
+
         // If the object isn't known to the server yet, we can't untrash it.
         let Some(server_id) = id.server_id() else {
             return;
@@ -3991,6 +4027,11 @@ impl UpdateManager {
         initiated_by: InitiatedBy,
         ctx: &mut ModelContext<Self>,
     ) {
+        if ChannelState::is_local_warp_drive() {
+            self.on_object_delete_success(vec![id.sync_id()], ctx);
+            return;
+        }
+
         // If the object isn't known to the server yet, we can't delete it.
         let Some(server_id) = id.server_id() else {
             return;
@@ -4101,6 +4142,38 @@ impl UpdateManager {
     }
 
     pub fn empty_trash(&mut self, space: Space, ctx: &mut ModelContext<Self>) {
+        if ChannelState::is_local_warp_drive() {
+            let Some(owner) = UserWorkspaces::as_ref(ctx).space_to_owner(space, ctx) else {
+                log::warn!("Tried to empty trash in unsupported space {space:?}");
+                return;
+            };
+            let deleted_ids = CloudModel::handle(ctx).read(ctx, |cloud_model, _| {
+                cloud_model
+                    .cloud_objects()
+                    .filter(|object| {
+                        object.permissions().owner == owner && object.is_trashed(cloud_model)
+                    })
+                    .map(|object| object.sync_id())
+                    .collect_vec()
+            });
+            let num_deleted_objects = self.on_object_delete_success(deleted_ids, ctx);
+            ctx.emit(UpdateManagerEvent::ObjectOperationComplete {
+                result: ObjectOperationResult {
+                    success_type: if num_deleted_objects == 0 {
+                        OperationSuccessType::Rejection
+                    } else {
+                        OperationSuccessType::Success
+                    },
+                    operation: ObjectOperation::EmptyTrash,
+                    client_id: None,
+                    server_id: None,
+                    num_objects: Some(num_deleted_objects),
+                },
+            });
+            ctx.notify();
+            return;
+        }
+
         let object_client = self.object_client.clone();
 
         let owner = match UserWorkspaces::as_ref(ctx).space_to_owner(space, ctx) {

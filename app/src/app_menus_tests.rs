@@ -33,3 +33,30 @@ fn paste_menu_uses_custom_action_and_shortcut() {
         trigger_to_keystroke(&Trigger::Custom(CustomAction::Paste.into()))
     );
 }
+
+#[test]
+fn edit_menu_includes_context_aware_editing_actions() {
+    let menu = edit_menu();
+    let expected = [
+        ("Undo", CustomAction::Undo),
+        ("Redo", CustomAction::Redo),
+        ("Cut", CustomAction::Cut),
+        ("Copy", CustomAction::Copy),
+        ("Paste", CustomAction::Paste),
+        ("Select All", CustomAction::SelectAll),
+        ("Clear Editor", CustomAction::ClearEditor),
+        ("Find", CustomAction::Find),
+    ];
+
+    for (name, action) in expected {
+        let item = menu.menu_items.iter().find_map(|item| match item {
+            MenuItem::Custom(item) if item.properties.name == name => Some(item),
+            _ => None,
+        });
+        let item = item.unwrap_or_else(|| panic!("Edit menu must include {name}"));
+        assert_eq!(
+            item.properties.keystroke,
+            trigger_to_keystroke(&Trigger::Custom(action.into()))
+        );
+    }
+}
