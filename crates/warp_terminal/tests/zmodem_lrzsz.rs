@@ -1,0 +1,408 @@
+//! Verifies the ZMODEM implementation against the real `lrzsz` tools.
+//!
+//! Unit tests cover the wire format against captured bytes, but only a live
+//! `sz` exercises the full negotiation: flow control, subpacket pacing, CRC
+//! checks, and end-of-file handshake. The test is skipped when `sz` is absent
+//! so it stays useful locally without becoming a hard CI dependency.
+
+#![cfg(unix)]
+
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::path::Path;
+use std::process::Stdio;
+
+use command::blocking::Command;
+use warp_terminal::zmodem::{OwnedEvent, TransferProgress, UploadFile, ZmodemRole, ZmodemSession};
+
+/// How long to wait between polls once the peer stops sending.
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// How many consecutive idle polls to tolerate before giving up. Generous
+/// enough to ride out `sz`'s own pauses, short enough to fail fast.
+const IDLE_POLL_LIMIT: usize = 300;
+
+/// Whether `sz` is installed and usable.
+fn have_sz() -> bool {
+    Command::new("sz")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success() || status.code() == Some(1))
+}
+
+/// Runs a real `sz` over a PTY and receives the file with [`ZmodemSession`].
+///
+/// Returns the received bytes and the name the sender advertised.
+fn receive_with_sz(path: &Path) -> (Vec<u8>, String) {
+    receive_with_sz_chunked(path, usize::MAX)
+}
+
+/// Same as [`receive_with_sz`], but caps how many bytes are handed to the
+/// session per call, mimicking a PTY that fragments the stream.
+fn receive_with_sz_chunked(path: &Path, max_chunk: usize) -> (Vec<u8>, String) {
+    let pty = open_raw_pty();
+
+    let mut child = Command::new("sz")
+        .arg("--zmodem")
+        .arg("--binary")
+        .arg(path)
+        // SAFETY: the fds are duplicated so the child and parent each own one,
+        // and `Stdio` closes only its own copy.
+        .stdin(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stdout(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sz");
+
+    // Closing our copy lets the PTY report EOF once the child exits.
+    // SAFETY: the child holds its own duplicated descriptors.
+    unsafe { libc::close(pty.slave) };
+
+    // SAFETY: `master` is a fresh descriptor this test exclusively owns.
+    let mut master: File = unsafe { File::from_raw_fd(pty.master) };
+    let mut session = ZmodemSession::new_download().expect("download session");
+    let mut received = Vec::new();
+    let mut name = String::new();
+
+    // The receiver advertises its capabilities before the sender will proceed.
+    let handshake = session.initial_output().expect("initial output");
+    if !handshake.is_empty() {
+        master.write_all(&handshake).expect("write handshake");
+    }
+
+    // `sz` keeps the PTY open retrying after the transfer ends, so reads are
+    // non-blocking and the loop gives up once the peer goes quiet.
+    // SAFETY: `master` is a descriptor this test exclusively owns.
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+    let mut buf = [0u8; 8192];
+    let mut idle_polls = 0;
+    while !session.is_finished() && idle_polls < IDLE_POLL_LIMIT {
+        let read = match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                idle_polls = 0;
+                n
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                idle_polls += 1;
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => panic!("PTY read failed: {error}"),
+        };
+
+        for piece in buf[..read].chunks(max_chunk.max(1)) {
+            let step = session.submit_wire(piece).expect("submit_wire");
+            if !step.to_pty.is_empty() {
+                master.write_all(&step.to_pty).expect("write reply");
+            }
+            if let Some(chunk) = step.file_data {
+                if !chunk.name.is_empty() {
+                    name = chunk.name;
+                }
+                received.extend_from_slice(&chunk.data);
+            }
+            for event in step.events {
+                if let OwnedEvent::FileStarted { name: started, .. } = event {
+                    name = started;
+                }
+            }
+        }
+    }
+
+    // `sz` lingers waiting for more protocol traffic after the session ends,
+    // so end it explicitly rather than waiting out its retry timeout.
+    let _ = child.kill();
+    let _ = child.wait();
+    (received, name)
+}
+
+#[test]
+fn receives_small_file_from_real_sz() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("small.txt");
+    let payload = b"ZMODEM round trip payload\n";
+    std::fs::write(&path, payload).expect("write source");
+
+    let (received, name) = receive_with_sz(&path);
+    assert_eq!(name, "small.txt");
+    assert_eq!(received, payload);
+}
+
+#[test]
+fn receives_binary_file_spanning_subpackets_from_real_sz() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("binary.bin");
+    // Larger than one 1 KiB subpacket, and includes every byte value so the
+    // ZDLE escaping path is exercised rather than just printable text.
+    let payload: Vec<u8> = (0..8192u32).map(|index| (index % 256) as u8).collect();
+    std::fs::write(&path, &payload).expect("write source");
+
+    let (received, name) = receive_with_sz(&path);
+    assert_eq!(name, "binary.bin");
+    assert_eq!(received.len(), payload.len(), "received byte count differs");
+    assert_eq!(received, payload);
+}
+
+#[test]
+fn receives_file_when_the_pty_fragments_every_byte() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("fragmented.txt");
+    let payload = b"ZMODEM must survive byte-at-a-time PTY reads\n";
+    std::fs::write(&path, payload).expect("write source");
+
+    // A PTY may deliver the preamble one byte per read; detection and the
+    // protocol must not depend on frames arriving whole.
+    let (received, name) = receive_with_sz_chunked(&path, 1);
+    assert_eq!(name, "fragmented.txt");
+    assert_eq!(received, payload);
+}
+
+#[test]
+fn renders_progress_and_summary_for_a_real_transfer() {
+    if !have_sz() {
+        eprintln!("skipping: `sz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("progress.bin");
+    let payload: Vec<u8> = (0..16384u32).map(|index| (index % 251) as u8).collect();
+    std::fs::write(&path, &payload).expect("write source");
+
+    // Replays what the event loop renders: the advertised size arrives with
+    // the file, and byte counts accumulate as subpackets land.
+    let pty = open_raw_pty();
+    let mut child = Command::new("sz")
+        .arg("--zmodem")
+        .arg("--binary")
+        .arg(&path)
+        // SAFETY: descriptors are duplicated so parent and child each own one.
+        .stdin(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stdout(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn sz");
+    // SAFETY: the child holds its own duplicated descriptors.
+    unsafe { libc::close(pty.slave) };
+    // SAFETY: `master` is a descriptor this test exclusively owns.
+    let mut master: File = unsafe { File::from_raw_fd(pty.master) };
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+    let mut session = ZmodemSession::new_download().expect("download session");
+    let mut progress = TransferProgress::default();
+    let mut status_lines = Vec::new();
+    let handshake = session.initial_output().expect("initial output");
+    master.write_all(&handshake).expect("write handshake");
+
+    let mut buf = [0u8; 8192];
+    let mut idle = 0;
+    while !session.is_finished() && idle < IDLE_POLL_LIMIT {
+        let read = match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                idle = 0;
+                n
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                idle += 1;
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => panic!("PTY read failed: {error}"),
+        };
+
+        let step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        if !step.to_pty.is_empty() {
+            master.write_all(&step.to_pty).expect("write reply");
+        }
+        if let Some(chunk) = &step.file_data {
+            progress.bytes_transferred += chunk.data.len() as u64;
+            status_lines.push(progress.render_line(ZmodemRole::Download));
+        }
+        for event in step.events {
+            match event {
+                OwnedEvent::FileStarted { name, size } => {
+                    progress.file_name = name;
+                    progress.bytes_total = size.map(u64::from).unwrap_or(0);
+                }
+                OwnedEvent::FileCompleted => {
+                    status_lines.push(progress.render_summary(ZmodemRole::Download, None));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(
+        progress.bytes_total,
+        payload.len() as u64,
+        "size advertised"
+    );
+    assert_eq!(progress.bytes_transferred, payload.len() as u64);
+    assert!(
+        status_lines.len() > 1,
+        "a multi-subpacket transfer must report progress more than once"
+    );
+
+    let summary = String::from_utf8(status_lines.last().unwrap().clone()).expect("utf8");
+    assert!(summary.contains("progress.bin"), "summary names the file");
+    assert!(summary.contains("16.0 KiB complete"), "got: {summary}");
+    assert!(summary.ends_with("\r\n"), "summary stays in scrollback");
+}
+
+/// Writes every byte to a non-blocking PTY, retrying on `WouldBlock`.
+///
+/// The real event loop hands bytes to mio and lets it drain them; a test that
+/// writes directly must absorb the back-pressure itself.
+fn write_all_blocking(pty: &mut File, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        match pty.write(bytes) {
+            Ok(0) => panic!("PTY refused the write"),
+            Ok(n) => bytes = &bytes[n..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+            }
+            Err(error) => panic!("PTY write failed: {error}"),
+        }
+    }
+}
+
+/// Opens a PTY in raw mode.
+///
+/// A default PTY is line-buffered, echoes what is written, and treats 0x11 and
+/// 0x13 as flow control. ZMODEM sends arbitrary binary, so echo feeds our own
+/// frames back as input and flow-control bytes are swallowed outright, which
+/// the receiver reports as a bad CRC. Real terminals put the line into raw
+/// mode before a transfer; tests driving a PTY directly must do the same.
+fn open_raw_pty() -> nix::pty::OpenptyResult {
+    use nix::sys::termios::{ControlFlags, InputFlags, LocalFlags, OutputFlags};
+
+    let pty = nix::pty::openpty(None, None).expect("openpty");
+    let mut attrs = nix::sys::termios::tcgetattr(pty.slave).expect("tcgetattr");
+
+    attrs.input_flags = InputFlags::empty();
+    attrs.output_flags = OutputFlags::empty();
+    attrs.local_flags = LocalFlags::empty();
+    attrs.control_flags |= ControlFlags::CS8;
+
+    nix::sys::termios::tcsetattr(pty.slave, nix::sys::termios::SetArg::TCSANOW, &attrs)
+        .expect("tcsetattr");
+
+    pty
+}
+
+/// Whether `rz` is installed and usable.
+fn have_rz() -> bool {
+    Command::new("rz")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success() || status.code() == Some(1))
+}
+
+/// Sends a file to a real `rz` and verifies what lands on disk.
+#[test]
+fn sends_file_to_real_rz() {
+    if !have_rz() {
+        eprintln!("skipping: `rz` (lrzsz) is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("upload.bin");
+    let payload: Vec<u8> = (0..4096u32).map(|index| (index % 256) as u8).collect();
+    std::fs::write(&source, &payload).expect("write source");
+
+    // `rz` writes into its working directory, so give it a clean one.
+    let dest_dir = dir.path().join("dest");
+    std::fs::create_dir(&dest_dir).expect("create dest dir");
+
+    let pty = open_raw_pty();
+    let mut child = Command::new("rz")
+        .arg("--binary")
+        .current_dir(&dest_dir)
+        // SAFETY: descriptors are duplicated so parent and child each own one.
+        .stdin(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stdout(unsafe { Stdio::from_raw_fd(libc::dup(pty.slave)) })
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn rz");
+    // SAFETY: the child holds its own duplicated descriptors.
+    unsafe { libc::close(pty.slave) };
+    // SAFETY: `master` is a descriptor this test exclusively owns.
+    let mut master: File = unsafe { File::from_raw_fd(pty.master) };
+    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+
+    let files = vec![UploadFile {
+        path: source.clone(),
+        name: b"upload.bin".to_vec(),
+        size: payload.len() as u32,
+    }];
+    let mut session = ZmodemSession::new_upload(files).expect("upload session");
+
+    let handshake = session.begin_upload().expect("begin upload");
+    write_all_blocking(&mut master, &handshake);
+
+    // The session answers file-data requests itself, so forwarding PTY output
+    // is all the driving required.
+    let mut buf = [0u8; 8192];
+    let mut idle = 0;
+    let mut bytes_sent = 0u64;
+    while !session.is_finished() && idle < IDLE_POLL_LIMIT {
+        let read = match master.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                idle = 0;
+                n
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                idle += 1;
+                std::thread::sleep(IDLE_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => panic!("PTY read failed: {error}"),
+        };
+
+        let step = session.submit_wire(&buf[..read]).expect("submit_wire");
+        bytes_sent += step.bytes_sent;
+        if !step.to_pty.is_empty() {
+            write_all_blocking(&mut master, &step.to_pty);
+        }
+    }
+
+    let _ = child.wait();
+
+    assert!(
+        session.is_finished(),
+        "session must close after the transfer"
+    );
+    assert_eq!(bytes_sent, payload.len() as u64, "all bytes were offered");
+
+    let landed = dest_dir.join("upload.bin");
+    assert!(landed.exists(), "rz did not create the file");
+    assert_eq!(std::fs::read(&landed).expect("read landed file"), payload);
+}

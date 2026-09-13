@@ -79,6 +79,8 @@ pub mod view;
 pub mod warpify;
 mod waterfall_gap_element;
 mod writeable_pty;
+pub mod zmodem_settings;
+pub mod zmodem_transfer;
 #[cfg(feature = "tui")]
 pub use writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
 #[cfg(windows)]

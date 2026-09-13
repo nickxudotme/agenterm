@@ -27,6 +27,7 @@ pub enum PtyIntent {
     Interrupt,
     ShutdownPty,
     WriteBytes(Cow<'static, [u8]>),
+    Zmodem(warp_terminal::zmodem::runtime::Control),
     WriteAgentInput {
         bytes: Cow<'static, [u8]>,
         mode: AIAgentPtyWriteMode,

@@ -1,0 +1,1105 @@
+//! ZMODEM (`sz` / `rz`) file transfer support.
+//!
+//! The terminal owns the PTY byte stream, so a ZMODEM transfer only works if
+//! the protocol bytes are intercepted before the ANSI parser renders them as
+//! garbage. This module owns that interception.
+//!
+//! Wire decoding here mirrors `zmodem2`'s own (CRC algorithms, ZDLE unescaping,
+//! header lengths) so the detector can never claim a transfer that the state
+//! machine would immediately reject.
+
+use std::collections::VecDeque;
+use std::io::Write;
+use std::path::PathBuf;
+
+pub use zmodem2::{Action, Error as ZmodemError, Event, FileInfo, Position, Receiver, Sender};
+
+#[path = "zmodem_runtime.rs"]
+pub mod runtime;
+
+/// ZMODEM pad character.
+pub const ZPAD: u8 = b'*';
+/// ZMODEM data link escape.
+pub const ZDLE: u8 = 0x18;
+/// XON; terminates a hex header.
+const XON: u8 = 0x11;
+/// CAN; used to build the abort sequence.
+const CAN: u8 = 0x18;
+/// Backspace padding used by the canonical abort sequence.
+const BS: u8 = 0x08;
+
+/// Header payload size: one frame-type byte plus four flag bytes.
+const HEADER_PAYLOAD_SIZE: usize = 5;
+/// Longest possible header body (`ZHEX`, two hex characters per byte).
+const MAX_HEADER_BODY_LEN: usize = (HEADER_PAYLOAD_SIZE + 2) * 2;
+
+/// ZMODEM frame encodings, matching the on-the-wire values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    Zbin = 0x41,
+    Zhex = 0x42,
+    Zbin32 = 0x43,
+}
+
+impl Encoding {
+    /// Number of bytes the encoded header body occupies on the wire.
+    fn body_len(self) -> usize {
+        let payload_and_crc = HEADER_PAYLOAD_SIZE
+            + match self {
+                Encoding::Zbin32 => 4,
+                Encoding::Zbin | Encoding::Zhex => 2,
+            };
+        match self {
+            // `ZHEX` sends every byte as two hex characters.
+            Encoding::Zhex => payload_and_crc * 2,
+            Encoding::Zbin | Encoding::Zbin32 => payload_and_crc,
+        }
+    }
+}
+
+/// Frame types the terminal needs to distinguish.
+///
+/// Discriminants are the on-the-wire ZMODEM frame type values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Frame {
+    /// `sz` announces it is ready to send.
+    Zrqinit = 0,
+    /// `rz` announces it is ready to receive.
+    Zrinit = 1,
+    /// A file is about to be transferred.
+    Zfile = 4,
+    /// The peer aborted the session.
+    Zabort = 7,
+    /// The session was cancelled.
+    Zcan = 0x17,
+    /// Any other frame; we only need to know that it decoded cleanly.
+    Other(u8),
+}
+
+impl Frame {
+    /// The on-the-wire frame type value.
+    pub fn frame_byte(self) -> u8 {
+        match self {
+            Frame::Zrqinit => 0,
+            Frame::Zrinit => 1,
+            Frame::Zfile => 4,
+            Frame::Zabort => 7,
+            Frame::Zcan => 0x17,
+            Frame::Other(other) => other,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            0 => Frame::Zrqinit,
+            1 => Frame::Zrinit,
+            4 => Frame::Zfile,
+            7 => Frame::Zabort,
+            0x17 => Frame::Zcan,
+            other => Frame::Other(other),
+        }
+    }
+}
+
+/// A decoded ZMODEM header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    pub encoding: Encoding,
+    pub frame: Frame,
+    /// The four flag bytes, usually read as a 32-bit count.
+    pub flags: [u8; 4],
+}
+
+impl Header {
+    /// The flag bytes read as a little-endian count.
+    pub fn count(self) -> u32 {
+        u32::from_le_bytes(self.flags)
+    }
+}
+
+fn crc16_xmodem(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+fn crc32_iso_hdlc(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// Maps the byte following a `ZDLE` back to its real value.
+const UNZDLE_TABLE: [u8; 0x100] = [
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x7f, 0xff, 0x6e, 0x6f,
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
+    0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+    0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f,
+    0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f,
+    0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+    0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+];
+
+/// Outcome of decoding a header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeResult {
+    /// A well-formed header was decoded. `len` counts every wire byte it used,
+    /// including the `ZPAD [ZPAD] ZDLE` prefix and any escaped bytes.
+    Header { header: Header, len: usize },
+    /// These bytes cannot begin a header.
+    NotAHeader,
+    /// The header is incomplete.
+    NeedMore,
+}
+
+/// Decodes a header from `bytes`, which must start with `ZPAD [ZPAD] ZDLE`.
+///
+/// `prefix_len` is the length of that prefix. Escaped bytes consume two wire
+/// bytes each, so `len` can exceed the logical header size.
+fn decode_header(bytes: &[u8], prefix_len: usize) -> DecodeResult {
+    let Some(&encoding_byte) = bytes.get(prefix_len) else {
+        return DecodeResult::NeedMore;
+    };
+    let Some(encoding) = encoding_from_byte(encoding_byte) else {
+        return DecodeResult::NotAHeader;
+    };
+
+    let mut body: [u8; MAX_HEADER_BODY_LEN] = [0; MAX_HEADER_BODY_LEN];
+    let mut body_len = 0;
+    let mut consumed = prefix_len + 1;
+    let mut escape_pending = false;
+
+    while body_len < encoding.body_len() {
+        let Some(&byte) = bytes.get(consumed) else {
+            return DecodeResult::NeedMore;
+        };
+        consumed += 1;
+        let value = if escape_pending {
+            escape_pending = false;
+            UNZDLE_TABLE[byte as usize]
+        } else if byte == ZDLE {
+            escape_pending = true;
+            continue;
+        } else {
+            byte
+        };
+        // A `ZHEX` body is pure hex once unescaped, so a non-hex byte rules
+        // the candidate out immediately instead of stalling the read.
+        if encoding == Encoding::Zhex && !is_hex_digit(value) {
+            return DecodeResult::NotAHeader;
+        }
+        body[body_len] = value;
+        body_len += 1;
+    }
+
+    match decode_header_body(encoding, &body[..body_len]) {
+        Some(header) => DecodeResult::Header {
+            header,
+            len: consumed,
+        },
+        None => DecodeResult::NotAHeader,
+    }
+}
+
+fn encoding_from_byte(byte: u8) -> Option<Encoding> {
+    match byte {
+        0x41 => Some(Encoding::Zbin),
+        0x42 => Some(Encoding::Zhex),
+        0x43 => Some(Encoding::Zbin32),
+        _ => None,
+    }
+}
+
+/// Whether `byte` is a hex digit in either case.
+fn is_hex_digit(byte: u8) -> bool {
+    byte.is_ascii_hexdigit()
+}
+
+/// Validates a fully received header body and decodes it.
+fn decode_header_body(encoding: Encoding, body: &[u8]) -> Option<Header> {
+    if encoding == Encoding::Zhex {
+        if !body.len().is_multiple_of(2) {
+            return None;
+        }
+        // Both hex cases are legal on the wire.
+        let nibble = |byte: u8| -> Option<u8> {
+            match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            }
+        };
+        let mut decoded = [0u8; MAX_HEADER_BODY_LEN];
+        for (index, pair) in body.chunks(2).enumerate() {
+            decoded[index] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        }
+        let len = body.len() / 2;
+        return decode_header_body_binary(encoding, &decoded[..len]);
+    }
+    decode_header_body_binary(encoding, body)
+}
+
+fn decode_header_body_binary(encoding: Encoding, body: &[u8]) -> Option<Header> {
+    let crc_len = match encoding {
+        Encoding::Zbin32 => 4,
+        Encoding::Zbin | Encoding::Zhex => 2,
+    };
+    if body.len() < HEADER_PAYLOAD_SIZE + crc_len {
+        return None;
+    }
+    let (payload, crc_bytes) = body.split_at(HEADER_PAYLOAD_SIZE);
+
+    match encoding {
+        Encoding::Zbin32 => {
+            let expected = crc32_iso_hdlc(payload).to_le_bytes();
+            if crc_bytes != &expected[..crc_len] {
+                return None;
+            }
+        }
+        Encoding::Zbin | Encoding::Zhex => {
+            let expected = crc16_xmodem(payload).to_be_bytes();
+            if crc_bytes != &expected[..crc_len] {
+                return None;
+            }
+        }
+    }
+
+    let mut flags = [0u8; 4];
+    flags.copy_from_slice(&payload[1..=4]);
+    Some(Header {
+        encoding,
+        frame: Frame::from_byte(payload[0]),
+        flags,
+    })
+}
+
+/// A header located in the PTY stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FoundHeader {
+    pub header: Header,
+    /// How many bytes the header occupies from where it starts.
+    pub len: usize,
+}
+
+/// What the caller should do with the bytes just fed to [`ZmodemDetector`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum DetectorOutcome {
+    /// No transfer: render these bytes through the normal terminal path.
+    ///
+    /// Empty when every byte is still held back as a possible header prefix.
+    Render(Vec<u8>),
+    /// A transfer starts. Render `render_before` through the normal path, then
+    /// feed `protocol` to [`ZmodemSession`]. `protocol` starts at the detected
+    /// header and includes any bytes that followed it in the same read.
+    Started {
+        header: Header,
+        render_before: Vec<u8>,
+        protocol: Vec<u8>,
+    },
+}
+
+/// Longest byte run that can still turn into a header.
+const MAX_PENDING: usize = MAX_HEADER_BODY_LEN + 8;
+
+/// Scans PTY output for a well-formed ZMODEM header.
+///
+/// Well-formedness is the detection bar: a transfer is claimed only when
+/// `zmodem2` would itself accept the frame, so ordinary binary output cannot be
+/// mistaken for ZMODEM. Bytes that might still become a header are held back
+/// for one read and released as [`DetectorOutcome::Render`] if they do not.
+#[derive(Default)]
+pub struct ZmodemDetector {
+    /// Bytes held because they could still complete a header.
+    pending: Vec<u8>,
+}
+
+impl ZmodemDetector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Discards any held bytes, e.g. when a transfer ends.
+    pub fn reset(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Feeds `bytes` and reports how they should be handled.
+    pub fn push(&mut self, bytes: &[u8]) -> DetectorOutcome {
+        let mut working = std::mem::take(&mut self.pending);
+        working.extend_from_slice(bytes);
+
+        let outcome = self.scan(&working);
+        match &outcome {
+            DetectorOutcome::Render(rendered) => {
+                // Keep whatever was not accounted for as renderable.
+                self.pending = working[rendered.len()..].to_vec();
+            }
+            DetectorOutcome::Started { .. } => self.reset(),
+        }
+        outcome
+    }
+
+    /// Finds the first valid header in `working`, or reports what to render.
+    fn scan(&self, working: &[u8]) -> DetectorOutcome {
+        let mut index = 0;
+        while index < working.len() {
+            if working[index] != ZPAD {
+                index += 1;
+                continue;
+            }
+            // ZMODEM accepts one or two pads before the `ZDLE`. A PTY can
+            // split the stream anywhere, so a run that reaches the end of the
+            // buffer is still a candidate: hold it instead of discarding the
+            // pad, or a byte-at-a-time preamble is never recognized.
+            let pads = match working.get(index + 1) {
+                Some(&ZPAD) => 2,
+                Some(_) => 1,
+                None => return DetectorOutcome::Render(working[..index].to_vec()),
+            };
+            match working.get(index + pads) {
+                Some(&ZDLE) => {}
+                Some(_) => {
+                    index += 1;
+                    continue;
+                }
+                None => return DetectorOutcome::Render(working[..index].to_vec()),
+            }
+
+            let prefix_len = pads + 1;
+            match decode_header(&working[index..], prefix_len) {
+                DecodeResult::Header { header, .. } => {
+                    return DetectorOutcome::Started {
+                        header,
+                        render_before: working[..index].to_vec(),
+                        protocol: working[index..].to_vec(),
+                    };
+                }
+                DecodeResult::NotAHeader => {
+                    // This pad run is not a header; keep scanning after it.
+                    index += 1;
+                }
+                DecodeResult::NeedMore => {
+                    // Candidate header at the tail: hold it for the next read.
+                    if working.len() - index > MAX_PENDING {
+                        index += 1;
+                        continue;
+                    }
+                    return DetectorOutcome::Render(working[..index].to_vec());
+                }
+            }
+        }
+        DetectorOutcome::Render(working.to_vec())
+    }
+}
+
+/// Progress of a transfer, rendered into the terminal so the block keeps a
+/// record of what was sent or received.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub file_name: String,
+    pub bytes_transferred: u64,
+    /// Total size advertised by the sender; zero when it is unknown.
+    pub bytes_total: u64,
+}
+
+impl TransferProgress {
+    /// Renders the in-place status line.
+    ///
+    /// Starts with a carriage return and ends without a newline so successive
+    /// updates overwrite each other instead of scrolling the block.
+    pub fn render_line(&self, role: ZmodemRole) -> Vec<u8> {
+        let mut line = format!(
+            "\r{} {}  {}",
+            role.label(),
+            self.file_name,
+            format_bytes(self.bytes_transferred)
+        );
+        if self.bytes_total > 0 {
+            line.push_str(&format!(
+                " / {}  {}%",
+                format_bytes(self.bytes_total),
+                self.percent()
+            ));
+        }
+        // Clear to end of line so a shorter update cannot leave stale digits.
+        line.push_str("\x1b[K");
+        line.into_bytes()
+    }
+
+    /// Renders the final summary line, which stays in the block's scrollback.
+    pub fn render_summary(&self, role: ZmodemRole, error: Option<&str>) -> Vec<u8> {
+        let outcome = match error {
+            Some(message) => format!("failed: {message}"),
+            None => format!("{} complete", format_bytes(self.bytes_transferred)),
+        };
+        format!(
+            "\r{} {}  {}\x1b[K\r\n",
+            role.label(),
+            self.file_name,
+            outcome
+        )
+        .into_bytes()
+    }
+
+    fn percent(&self) -> u64 {
+        if self.bytes_total == 0 {
+            return 0;
+        }
+        // Saturate rather than exceed 100 if a sender over-delivers.
+        (self.bytes_transferred.saturating_mul(100) / self.bytes_total).min(100)
+    }
+}
+
+/// Formats a byte count for display, in the units a person would use.
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    match bytes {
+        b if b >= GIB => format!("{:.1} GiB", b as f64 / GIB as f64),
+        b if b >= MIB => format!("{:.1} MiB", b as f64 / MIB as f64),
+        b if b >= KIB => format!("{:.1} KiB", b as f64 / KIB as f64),
+        b => format!("{b} B"),
+    }
+}
+
+/// Which side of the transfer the terminal plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZmodemRole {
+    /// The remote runs `sz`; we write files to disk.
+    Download,
+    /// The remote runs `rz`; we read files from disk.
+    Upload,
+}
+
+impl ZmodemRole {
+    /// Short prefix identifying the direction in the status line.
+    fn label(self) -> &'static str {
+        match self {
+            ZmodemRole::Download => "sz <<",
+            ZmodemRole::Upload => "rz >>",
+        }
+    }
+}
+
+/// A file queued for upload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UploadFile {
+    pub path: PathBuf,
+    /// Name advertised on the wire.
+    pub name: Vec<u8>,
+    pub size: u32,
+}
+
+impl UploadFile {
+    /// The file's modification time as the octal string `sz` sends.
+    ///
+    /// `rz` parses this field but does not require it to be accurate, so an
+    /// unreadable timestamp falls back to zero rather than failing the send.
+    fn mtime_octal(&self) -> String {
+        let seconds = std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_secs())
+            .unwrap_or(0);
+        format!("{seconds:o}")
+    }
+}
+
+/// Builds the canonical ZMODEM abort sequence.
+///
+/// Two `CAN`s are the protocol payload; the trailing backspaces are padding
+/// that survives line noise.
+pub fn abort_sequence() -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&[ZPAD, ZPAD, ZPAD]);
+    out.extend_from_slice(&[CAN, CAN]);
+    out.extend_from_slice(&[BS; 8]);
+    out
+}
+
+/// Builds a `ZRQINIT` header, which nudges a waiting `rz` into handshaking.
+pub fn zrqinit_sequence() -> Vec<u8> {
+    encode_hex_header(Frame::Zrqinit, &[0; 4])
+}
+
+/// Encodes a `ZHEX` header with the given frame type and flags.
+fn encode_hex_header(frame: Frame, flags: &[u8; 4]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(HEADER_PAYLOAD_SIZE + 2);
+    payload.push(frame.frame_byte());
+    payload.extend_from_slice(flags);
+    payload.extend_from_slice(&crc16_xmodem(&payload).to_be_bytes());
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&[ZPAD, ZPAD, ZDLE, Encoding::Zhex as u8]);
+    for &byte in &payload {
+        let mut hex = [0u8; 2];
+        hex::encode_to_slice([byte], &mut hex).expect("one byte encodes to two hex chars");
+        for &nibble in &hex {
+            out.push(nibble);
+            // A `ZDLE` inside the body must itself be escaped.
+            if nibble == ZDLE {
+                out.push(ZDLE);
+            }
+        }
+    }
+    // `lrzsz` terminates a hex header with CR, LF-with-high-bit, XON; match
+    // it so our upload headers are byte-identical to what `sz` would send.
+    out.extend_from_slice(&[b'\r', b'\n' | 0x80, XON]);
+    out
+}
+
+/// A live ZMODEM transfer.
+///
+/// Wraps the `zmodem2` state machine for the terminal's role and turns PTY
+/// output into file bytes (or the reverse) plus protocol bytes to write back.
+/// The caller owns all I/O: nothing here blocks or touches the filesystem
+/// except through the buffers it hands back.
+pub enum ZmodemSession {
+    /// The remote is running `sz`; we are writing files to disk.
+    Download(Box<DownloadSession>),
+    /// The remote is running `rz`; we are reading files from disk.
+    Upload(Box<UploadSession>),
+}
+
+impl ZmodemSession {
+    /// Starts receiving files from a remote `sz`.
+    pub fn new_download() -> Result<Self, ZmodemError> {
+        Ok(ZmodemSession::Download(Box::new(DownloadSession {
+            receiver: Receiver::with_flow_control(0, true)?,
+            current_name: String::new(),
+            finished: false,
+        })))
+    }
+
+    /// Starts sending `files` to a remote `rz`.
+    pub fn new_upload(files: Vec<UploadFile>) -> Result<Self, ZmodemError> {
+        Ok(ZmodemSession::Upload(Box::new(UploadSession {
+            sender: Sender::new()?,
+            files: files.into_iter().collect::<VecDeque<_>>(),
+            current: None,
+            current_data: Vec::new(),
+            finished: false,
+            pending_zfile: None,
+        })))
+    }
+
+    /// Whether the transfer has ended and the session should be dropped.
+    pub fn is_finished(&self) -> bool {
+        match self {
+            ZmodemSession::Download(session) => session.finished,
+            ZmodemSession::Upload(session) => session.finished,
+        }
+    }
+
+    pub fn role(&self) -> ZmodemRole {
+        match self {
+            ZmodemSession::Download(_) => ZmodemRole::Download,
+            ZmodemSession::Upload(_) => ZmodemRole::Upload,
+        }
+    }
+
+    /// Feeds PTY output into the protocol and returns what the caller must do.
+    ///
+    /// `file_bytes` carries received data for downloads; `to_pty` carries
+    /// protocol bytes that must be written back to advance the transfer.
+    pub fn submit_wire(&mut self, bytes: &[u8]) -> Result<ZmodemStep, ZmodemError> {
+        match self {
+            ZmodemSession::Download(session) => session.submit_wire(bytes),
+            ZmodemSession::Upload(session) => session.submit_wire(bytes),
+        }
+    }
+
+    /// Bytes to write to the PTY right after the session is created.
+    pub fn initial_output(&mut self) -> Result<Vec<u8>, ZmodemError> {
+        match self {
+            ZmodemSession::Download(session) => session.step(),
+            ZmodemSession::Upload(session) => session.step(),
+        }
+    }
+
+    /// Starts the upload once a receiver is ready.
+    ///
+    /// The session reads and answers file data itself, so the caller only
+    /// needs to forward the returned bytes and keep feeding PTY output.
+    pub fn begin_upload(&mut self) -> Result<Vec<u8>, ZmodemError> {
+        match self {
+            ZmodemSession::Download(_) => Ok(Vec::new()),
+            ZmodemSession::Upload(session) => session.step(),
+        }
+    }
+
+    /// Aborts the transfer, returning bytes to write to the PTY.
+    pub fn abort(&mut self) -> Vec<u8> {
+        match self {
+            ZmodemSession::Download(session) => session.abort(),
+            ZmodemSession::Upload(session) => session.abort(),
+        }
+    }
+}
+
+/// One round of protocol progress.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ZmodemStep {
+    /// Bytes that must be written to the PTY.
+    pub to_pty: Vec<u8>,
+    /// File data received, with the name advertised by the sender.
+    pub file_data: Option<FileChunk>,
+    /// Events the protocol reported.
+    pub events: Vec<OwnedEvent>,
+    /// File bytes the sender must supply next.
+    ///
+    /// Only set by download sessions; uploads answer their own requests.
+    pub file_request: Option<FileRequest>,
+    /// Bytes handed to the sender during this step, for upload progress.
+    pub bytes_sent: u64,
+    /// Whether the session has finished, successfully or not.
+    pub finished: bool,
+}
+
+/// A chunk of a file being received.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileChunk {
+    pub name: String,
+    /// Byte offset this data belongs to.
+    pub offset: u64,
+    pub data: Vec<u8>,
+}
+
+/// A request for the sender side to produce file bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileRequest {
+    pub offset: u32,
+    pub max_len: usize,
+}
+
+pub struct DownloadSession {
+    receiver: Receiver,
+    /// Name advertised by the sender for the file in flight.
+    current_name: String,
+    finished: bool,
+}
+
+impl DownloadSession {
+    fn step(&mut self) -> Result<Vec<u8>, ZmodemError> {
+        let mut sink = PtySink::new();
+        let mut events = Vec::new();
+        // Drain the handshake: `poll` yields wire bytes until it goes idle.
+        loop {
+            match self.receiver.poll() {
+                Action::WriteWire(bytes) => {
+                    let len = bytes.len();
+                    sink.write_all(bytes).expect("sink never errors");
+                    self.receiver.wire_written(len);
+                }
+                Action::Idle => break,
+                Action::Event(event) => events.push(own_event(event)),
+                _ => break,
+            }
+        }
+        Ok(sink.take())
+    }
+
+    fn submit_wire(&mut self, bytes: &[u8]) -> Result<ZmodemStep, ZmodemError> {
+        let mut step = ZmodemStep::default();
+        let mut consumed = 0usize;
+        let mut sink = PtySink::new();
+
+        // The receiver stops consuming input while it has work pending (bytes
+        // to send, data to persist, events to report). Draining between
+        // submissions is what unblocks it, so input and drain must interleave:
+        // consuming as much as possible up front and draining afterwards
+        // silently discards the tail of the buffer, which is where frames like
+        // ZEOF live.
+        loop {
+            let before = consumed;
+            if consumed < bytes.len() {
+                consumed += self.receiver.submit_wire(&bytes[consumed..])?;
+            }
+            let drained = self.drain(&mut step, &mut sink)?;
+
+            // Stop only when neither side can advance: no input was accepted
+            // and nothing was produced. Either alone is normal progress.
+            if consumed == before && !drained {
+                break;
+            }
+        }
+
+        step.to_pty = sink.take();
+        Ok(step)
+    }
+
+    /// Drains every pending action, returning whether anything was produced.
+    fn drain(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
+        let mut progressed = false;
+        loop {
+            match self.receiver.poll() {
+                Action::WriteWire(to_write) => {
+                    let len = to_write.len();
+                    sink.write_all(to_write).expect("sink never errors");
+                    self.receiver.wire_written(len);
+                    progressed = true;
+                }
+                Action::WriteFile(data) => {
+                    let len = data.len();
+                    let chunk = step.file_data.get_or_insert_with(|| FileChunk {
+                        name: self.current_name.clone(),
+                        offset: 0,
+                        data: Vec::new(),
+                    });
+                    chunk.name = self.current_name.clone();
+                    chunk.data.extend_from_slice(data);
+                    self.receiver.file_written(len)?;
+                    progressed = true;
+                }
+                Action::Event(event) => {
+                    let owned = own_event(event);
+                    if let OwnedEvent::FileStarted { ref name, .. } = owned {
+                        self.current_name.clone_from(name);
+                    }
+                    if matches!(owned, OwnedEvent::SessionCompleted | OwnedEvent::Aborted) {
+                        step.finished = true;
+                        self.finished = true;
+                    }
+                    step.events.push(owned);
+                    progressed = true;
+                }
+                // `Action` is `#[non_exhaustive]`; unknown variants cannot be
+                // handled meaningfully, so stop rather than spin.
+                _ => break,
+            }
+        }
+        Ok(progressed)
+    }
+
+    fn abort(&mut self) -> Vec<u8> {
+        let _ = self.receiver.abort();
+        abort_sequence()
+    }
+}
+
+pub struct UploadSession {
+    sender: Sender,
+    files: VecDeque<UploadFile>,
+    current: Option<UploadFile>,
+    /// Contents of the file being sent, so `ReadFile` is answered inline.
+    ///
+    /// `zmodem2` requires `submit_file` to be followed immediately by more
+    /// polling, so the data has to be on hand rather than fetched by the
+    /// caller between steps.
+    current_data: Vec<u8>,
+    finished: bool,
+    /// ZFILE frame to emit once the receiver has introduced itself.
+    ///
+    /// `zmodem2` omits the metadata `rz` requires, so the frame is built here
+    /// and sent directly instead.
+    pending_zfile: Option<Vec<u8>>,
+}
+
+impl UploadSession {
+    fn step(&mut self) -> Result<Vec<u8>, ZmodemError> {
+        let mut step = ZmodemStep::default();
+        let mut sink = PtySink::new();
+        self.drive(&mut step, &mut sink)?;
+        Ok(sink.take())
+    }
+
+    fn submit_wire(&mut self, bytes: &[u8]) -> Result<ZmodemStep, ZmodemError> {
+        let mut step = ZmodemStep::default();
+        let mut consumed = 0usize;
+        let mut sink = PtySink::new();
+
+        loop {
+            let before = consumed;
+            if consumed < bytes.len() {
+                consumed += self.sender.submit_wire(&bytes[consumed..])?;
+            }
+            let progressed = self.drive(&mut step, &mut sink)?;
+            if consumed == before && !progressed {
+                break;
+            }
+        }
+
+        step.to_pty = sink.take();
+        Ok(step)
+    }
+
+    /// Drives the sender, handling one action per poll.
+    ///
+    /// `zmodem2` expects each action to be resolved before the next poll, and
+    /// in particular expects `submit_file` to be followed immediately by more
+    /// polling so the data frame reaches the wire. Batching actions instead
+    /// leaves the transfer stalled with ZEOF unsent.
+    fn drive(&mut self, step: &mut ZmodemStep, sink: &mut PtySink) -> Result<bool, ZmodemError> {
+        let mut progressed = false;
+
+        loop {
+            // Offer the next file whenever the sender is between files. While
+            // it still awaits ZRINIT this only records the file; the frame
+            // goes out once the receiver has introduced itself.
+            self.offer_next_file()?;
+
+            match self.sender.poll() {
+                Action::WriteWire(to_write) => {
+                    let len = to_write.len();
+                    // Substitute our ZFILE for `zmodem2`'s, which `rz` ignores.
+                    // Both describe the same file, so the state machine stays
+                    // consistent; only the bytes on the wire differ.
+                    match self.pending_zfile.take() {
+                        Some(frame) if is_zfile_frame(to_write) => {
+                            sink.write_all(&frame).expect("sink never errors");
+                        }
+                        pending => {
+                            self.pending_zfile = pending;
+                            sink.write_all(to_write).expect("sink never errors");
+                        }
+                    }
+                    self.sender.wire_written(len);
+                    progressed = true;
+                }
+                Action::ReadFile { offset, max_len } => {
+                    let start = offset.get() as usize;
+                    if start >= self.current_data.len() {
+                        // Nothing left to send; the sender emits ZEOF next.
+                        return Ok(progressed);
+                    }
+                    let end = start.saturating_add(max_len).min(self.current_data.len());
+                    let chunk = self.current_data[start..end].to_vec();
+                    self.sender.submit_file(&chunk)?;
+                    step.bytes_sent += (end - start) as u64;
+                    progressed = true;
+                }
+                Action::Event(event) => {
+                    let owned = own_event(event);
+                    if matches!(owned, OwnedEvent::FileCompleted) {
+                        self.current = None;
+                        self.current_data.clear();
+                        // No more files means the session can close.
+                        if self.files.is_empty() {
+                            self.sender.finish()?;
+                        }
+                    }
+                    if matches!(owned, OwnedEvent::SessionCompleted | OwnedEvent::Aborted) {
+                        step.finished = true;
+                        self.finished = true;
+                    }
+                    step.events.push(owned);
+                    progressed = true;
+                }
+                // `Action` is `#[non_exhaustive]`; unknown variants cannot be
+                // handled meaningfully, so stop rather than spin.
+                _ => return Ok(progressed),
+            }
+        }
+    }
+
+    /// Offers the next queued file, loading its contents.
+    fn offer_next_file(&mut self) -> Result<(), ZmodemError> {
+        if self.current.is_some() {
+            return Ok(());
+        }
+        let Some(file) = self.files.pop_front() else {
+            return Ok(());
+        };
+
+        // An unreadable file is skipped rather than failing the whole session,
+        // which would abandon files that are still fine.
+        let data = match std::fs::read(&file.path) {
+            Ok(data) => data,
+            Err(error) => {
+                log::warn!("Skipping unreadable ZMODEM upload file: {error}");
+                return Ok(());
+            }
+        };
+
+        self.sender
+            .start_file(FileInfo::new(&file.name, Some(Position::new(file.size))))?;
+        // Queue our own frame; `zmodem2`'s is missing metadata `rz` needs.
+        self.pending_zfile = Some(zfile_frame(&file.name, file.size, &file.mtime_octal()));
+        self.current_data = data;
+        self.current = Some(file);
+        Ok(())
+    }
+
+    fn abort(&mut self) -> Vec<u8> {
+        self.sender.abort();
+        abort_sequence()
+    }
+}
+
+/// An owned protocol event, so sessions can outlive the borrow `poll` gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnedEvent {
+    FileStarted { name: String, size: Option<u32> },
+    FileCompleted,
+    SessionCompleted,
+    Aborted,
+}
+
+fn own_event(event: Event<'_>) -> OwnedEvent {
+    match event {
+        Event::FileStarted(info) => OwnedEvent::FileStarted {
+            name: String::from_utf8_lossy(info.name).into_owned(),
+            size: info.size.map(Position::get),
+        },
+        Event::FileCompleted | Event::FileSkipped => OwnedEvent::FileCompleted,
+        Event::SessionCompleted => OwnedEvent::SessionCompleted,
+        Event::Aborted => OwnedEvent::Aborted,
+        _ => OwnedEvent::Aborted,
+    }
+}
+
+/// ZDLE escape table: maps a byte to its escaped form.
+const ZDLE_TABLE: [u8; 0x100] = {
+    let mut table = [0u8; 0x100];
+    let mut index = 0;
+    while index < 0x100 {
+        table[index] = index as u8;
+        index += 1;
+    }
+    // Control characters ZMODEM must not put on the wire bare.
+    table[0x0a] = 0x4a;
+    table[0x0d] = 0x4d;
+    table[0x10] = 0x50;
+    table[0x11] = 0x51;
+    table[0x13] = 0x53;
+    table[0x18] = 0x58;
+    table[0x8d] = 0xcd;
+    table[0x90] = 0xd0;
+    table[0x91] = 0xd1;
+    table[0x93] = 0xd3;
+    table[0x7f] = 0x6c;
+    table[0xff] = 0x6d;
+    table
+};
+
+/// Whether `byte` must be escaped before transmission.
+fn needs_escape(byte: u8) -> bool {
+    ZDLE_TABLE[byte as usize] != byte || byte == ZDLE
+}
+
+/// Appends `byte`, escaping it when the protocol requires.
+fn push_escaped(out: &mut Vec<u8>, byte: u8) {
+    if needs_escape(byte) {
+        out.push(ZDLE);
+        out.push(ZDLE_TABLE[byte as usize]);
+    } else {
+        out.push(byte);
+    }
+}
+
+/// Whether `bytes` begins a `ZBIN32` `ZFILE` frame.
+fn is_zfile_frame(bytes: &[u8]) -> bool {
+    bytes.len() > 3
+        && bytes[0] == ZPAD
+        && bytes[1] == ZDLE
+        && bytes[2] == Encoding::Zbin32 as u8
+        && bytes[3] == Frame::Zfile.frame_byte()
+}
+
+/// Builds a `ZFILE` frame that `lrzsz`'s `rz` accepts.
+///
+/// `zmodem2` emits only the name and size, but `rz` requires the full metadata
+/// line that `sz` sends (`size mtime mode files_remaining bytes_remaining`)
+/// and the `ZCONV` flag in the header. Without them it silently ignores the
+/// frame and the transfer never starts, so this frame is built here instead.
+pub fn zfile_frame(name: &[u8], size: u32, mtime_octal: &str) -> Vec<u8> {
+    // ZBIN32 header: frame type, then flags. The final flag byte carries
+    // ZCONV=ZCBIN (binary, no newline translation), which `sz` also sets.
+    let mut payload = Vec::new();
+    payload.push(Frame::Zfile.frame_byte());
+    payload.extend_from_slice(&[0, 0, 0, 1]);
+
+    let mut out = Vec::new();
+    out.push(ZPAD);
+    out.push(ZDLE);
+    out.push(Encoding::Zbin32 as u8);
+    let header_crc = crc32_iso_hdlc(&payload).to_le_bytes();
+    for &byte in payload.iter().chain(header_crc.iter()) {
+        push_escaped(&mut out, byte);
+    }
+
+    // Metadata subpacket: NUL-terminated name, then the fields `rz` parses.
+    // `files_remaining` and `bytes_remaining` describe this single file.
+    let mut data = Vec::new();
+    data.extend_from_slice(name);
+    data.push(0);
+    data.extend_from_slice(format!("{size} {mtime_octal} 100644 0 1 {size}\0").as_bytes());
+
+    for &byte in &data {
+        push_escaped(&mut out, byte);
+    }
+    // ZCRCW: this subpacket ends the frame and expects a response.
+    const ZCRCW: u8 = b'k';
+    out.push(ZDLE);
+    out.push(ZCRCW);
+
+    let mut crc_input = data.clone();
+    crc_input.push(ZCRCW);
+    let data_crc = crc32_iso_hdlc(&crc_input).to_le_bytes();
+    for &byte in &data_crc {
+        push_escaped(&mut out, byte);
+    }
+    out
+}
+
+/// Sink that `zmodem2` writes outgoing protocol bytes into.
+#[derive(Default)]
+pub struct PtySink {
+    bytes: Vec<u8>,
+}
+
+impl PtySink {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Write for PtySink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "zmodem_tests.rs"]
+mod tests;

@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::path::PathBuf;
 
 use crate::SizeInfo;
+use crate::zmodem::runtime::Control;
 
 /// Messages that may be sent to the `EventLoop`.
 #[derive(Debug)]
@@ -20,4 +22,12 @@ pub enum Message {
 
     /// Instruction to resize the PTY.
     Resize(SizeInfo),
+
+    /// Controls the transfer owned by this PTY without carrying file contents.
+    Zmodem(Control),
+
+    /// Start a ZMODEM upload of the given local files to a remote `rz`.
+    ///
+    /// The transfer is driven on the PTY thread, which owns the byte stream.
+    StartZmodemUpload { paths: Vec<PathBuf> },
 }

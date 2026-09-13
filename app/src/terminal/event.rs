@@ -136,6 +136,7 @@ pub enum Event {
         image_data: Vec<u8>,
         image_protocol: ImageProtocol,
     },
+    Zmodem(warp_terminal::zmodem::runtime::TransferEvent),
     BootstrapPrecmdDone,
     /// A pluggable notification triggered via OSC 9 or OSC 777 escape sequences.
     /// External programs can use this to trigger notifications in Warp.
@@ -172,6 +173,14 @@ impl From<warp_terminal::event::Event> for Event {
                 image_data,
                 image_protocol,
             },
+            warp_terminal::event::Event::Zmodem(event) => Self::Zmodem(event),
+            // Legacy core events cannot carry file contents into the GUI.
+            warp_terminal::event::Event::ZmodemDownloadStarted { .. }
+            | warp_terminal::event::Event::ZmodemUploadRequested
+            | warp_terminal::event::Event::ZmodemProgress { .. }
+            | warp_terminal::event::Event::ZmodemFileData { .. }
+            | warp_terminal::event::Event::ZmodemFileCompleted { .. }
+            | warp_terminal::event::Event::ZmodemFinished { .. } => Self::MouseCursorDirty,
         }
     }
 }
@@ -485,6 +494,7 @@ impl Debug for Event {
             }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
+            Event::Zmodem(_) => write!(f, "Zmodem"),
             Event::ImageReceived { image_id, .. } => {
                 write!(f, "ImageReceived(image_id: {image_id})")
             }

@@ -68,6 +68,11 @@ pub fn wire_up_pty_controller_with_surface<T: EventLoopSender, S: TerminalSurfac
                     controller.shutdown_pty(ctx);
                 });
             }
+            PtyIntent::Zmodem(control) => {
+                controller.update(ctx, |controller, ctx| {
+                    controller.zmodem_control(control, ctx);
+                });
+            }
             PtyIntent::WriteBytes(bytes) => {
                 controller.update(ctx, |controller, ctx| {
                     // TODO: the underlying bytes should be wrapped in an Arc and copied out only when they need to be written to the PTY.

@@ -604,6 +604,14 @@ impl<T: EventLoopSender> PtyController<T> {
         );
     }
 
+    pub fn zmodem_control(
+        &mut self,
+        control: warp_terminal::zmodem::runtime::Control,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.send_message_to_event_loop(Message::Zmodem(control), ctx);
+    }
+
     /// Shuts down the pty and event loop.
     pub fn shutdown_pty(&mut self, ctx: &mut ModelContext<Self>) {
         self.send_message_to_event_loop(Message::Shutdown, ctx);

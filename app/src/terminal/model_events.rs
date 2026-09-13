@@ -277,6 +277,7 @@ impl ModelEventDispatcher {
                 image_data,
                 image_protocol,
             },
+            Event::Zmodem(event) => ModelEvent::Zmodem(event),
             Event::BootstrapPrecmdDone => ModelEvent::BootstrapPrecmdDone,
             Event::AgentTaggedInChanged {
                 block_id,
@@ -486,6 +487,7 @@ pub enum ModelEvent {
     ExitShell {
         session_id: SessionId,
     },
+    Zmodem(warp_terminal::zmodem::runtime::TransferEvent),
 }
 
 #[derive(Clone, Debug)]

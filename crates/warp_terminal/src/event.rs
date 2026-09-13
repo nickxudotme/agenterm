@@ -7,6 +7,7 @@ use hex::FromHexError;
 use itertools::Itertools as _;
 use warp_util::AsciiDebug;
 
+use crate::zmodem::runtime::TransferEvent;
 use crate::{ClipboardType, ImageProtocol};
 /// Emitted upon completion of an executor command that goes through the pty, such as the
 /// InBandCommandExecutor.
@@ -151,6 +152,8 @@ pub enum InBandCommandOutputDecodingError {
 }
 #[derive(Clone)]
 pub enum Event {
+    /// Ordered metadata for this terminal's native file transfer.
+    Zmodem(TransferEvent),
     MouseCursorDirty,
     ClipboardStore(ClipboardType, String),
     ClipboardLoad(
@@ -163,5 +166,35 @@ pub enum Event {
         image_id: u32,
         image_data: Vec<u8>,
         image_protocol: ImageProtocol,
+    },
+    /// A remote `sz` started a ZMODEM download. The terminal has taken over the
+    /// PTY stream and will emit [`Event::ZmodemProgress`] until it finishes.
+    ZmodemDownloadStarted {
+        file_name: Option<String>,
+    },
+    /// A remote `rz` is waiting for files, so the user should be asked which
+    /// ones to send. Detected from the receiver's own handshake, because `rz`
+    /// never initiates: it announces readiness and waits.
+    ZmodemUploadRequested,
+    /// Progress for the in-flight ZMODEM transfer.
+    ZmodemProgress {
+        file_name: String,
+        bytes_transferred: u64,
+        bytes_total: u64,
+    },
+    /// A chunk of received file data, to be appended to the file in flight.
+    ///
+    /// Carried as an event because the PTY thread cannot block on file I/O.
+    ZmodemFileData {
+        name: String,
+        data: Vec<u8>,
+    },
+    /// A file finished transferring.
+    ZmodemFileCompleted {
+        file_name: String,
+    },
+    /// The transfer ended; `error` is `None` on success.
+    ZmodemFinished {
+        error: Option<String>,
     },
 }

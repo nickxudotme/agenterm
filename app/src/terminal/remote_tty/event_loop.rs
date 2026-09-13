@@ -6,6 +6,9 @@ use futures_util::SinkExt;
 use parking_lot::FairMutex;
 use serde::Serialize;
 use warp_errors::report_error;
+use warp_terminal::zmodem::runtime::{
+    Control, ErrorKind, Role, TransferError, TransferEvent, TransferOutcome,
+};
 use warpui::{Entity, ModelContext, SingletonEntity};
 use websocket::{Message, Sink, Stream, WebSocket, WebsocketMessage as _};
 
@@ -112,6 +115,7 @@ impl EventLoop {
 
         let terminal_model_for_init = self.terminal_model.clone();
         let receiver = self.event_loop_rx.clone();
+        let event_listener = self.channel_event_listener.clone();
         ctx.background_executor()
             .spawn(async move {
                 if let Err(e) = Self::write_env_vars(&mut sink, is_honor_ps1_enabled).await {
@@ -155,6 +159,33 @@ impl EventLoop {
                                         .context("Failed to send message to network-backed PTY")
                                 );
                             };
+                        }
+                        // ZMODEM is driven by the local PTY event loop, which
+                        // owns the byte stream; a network-backed PTY has no
+                        // equivalent interception point.
+                        EventLoopMessage::Zmodem(control) => {
+                            let (id, role) = match control {
+                                Control::Enable(_) | Control::Cancel { .. } => continue,
+                                Control::StartUpload { id, .. } | Control::Upload { id, .. } => {
+                                    (id, Role::Upload)
+                                }
+                                Control::Download { id, .. } => (id, Role::Download),
+                            };
+                            event_listener.send_terminal_event(
+                                warp_terminal::event::Event::Zmodem(TransferEvent::Finished {
+                                    id,
+                                    role,
+                                    outcome: TransferOutcome::Failed(TransferError {
+                                        kind: ErrorKind::Configuration,
+                                        message: "ZMODEM is unavailable on a network-backed PTY"
+                                            .to_owned(),
+                                    }),
+                                    committed_paths: Vec::new(),
+                                }),
+                            );
+                        }
+                        EventLoopMessage::StartZmodemUpload { .. } => {
+                            log::warn!("ZMODEM uploads are not supported on a network-backed PTY");
                         }
                         // TODO(alokedesai): Implement shutdown on the network backed PTY.
                         EventLoopMessage::Shutdown | EventLoopMessage::ChildExited => {}
