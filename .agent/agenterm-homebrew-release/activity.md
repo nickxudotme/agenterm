@@ -17,3 +17,14 @@
 - 用户批准公开 Agenterm 仓库并发布 `v0.1.0`。
 - 首次 release run `34744450173` 在旧 Xcode 不支持 `-downloadComponent` 时失败；workflow 改为
   按能力下载 Metal toolchain，旧 Xcode runner 则验证预装的 `metal` 与 `metallib`。
+- GitHub ARM runner 的第二次冷构建耗时过长，用户批准切换为本地制品；该 run 已取消。
+- 从独立 `v0.1.0` worktree（`c548129d6a2a102301f3b4a25775af5c75845b7b`）复用 Cargo 缓存完成
+  正式构建，总耗时约 10 分钟，ZIP SHA-256 为
+  `2829594f2660c9820f2b3551f655ca4a11a18ef43bed7d401bf30b0ac973fdca`。
+- GitHub Release `v0.1.0` 已公开，远端 asset digest 与本地 SHA 一致；tap 更新到 commit
+  `f3e8da8`，并跳过会被旧测试 tag 干扰的 livecheck。
+- 从公开 Release URL 执行 `brew install --cask nickxudotme/tap/agenterm` 成功，中英文 caveats
+  正常显示；安装后的 Bundle ID、版本、arm64 架构及 ad-hoc 签名通过验证。
+- `/Applications/Agenterm.app` 已成功启动，Agenterm 主进程与 terminal server 均正常运行。
+- `brew audit --new --cask` 的下载和校验通过，剩余失败仅为新仓库关注度门槛及缺少 Apple
+  Developer ID 签名，符合首发已知边界。

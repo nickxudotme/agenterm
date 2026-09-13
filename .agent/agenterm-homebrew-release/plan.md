@@ -7,10 +7,10 @@
 
 ## 当前状态
 
-- 状态：in_progress
-- 当前步骤：正式发布与发布后验证
-- 上次同步：2026-09-13，用户批准公开仓库并执行发布
-- 下一步：提交、配置 tap deploy key、推送 `v0.1.0` 并验证 Homebrew 安装
+- 状态：complete
+- 当前步骤：已完成
+- 上次同步：2026-09-13，完成 `v0.1.0` 公开发布及 Homebrew 实装验证
+- 下一步：另立任务缩减 Agenterm 的编译依赖与首次构建时间
 
 ## Scope 与边界
 
@@ -31,19 +31,18 @@
 
 ## 成功标准
 
-- [ ] 推送 `v0.1.0` 或手工指定 `0.1.0` 可构建并验证 `Agenterm.app`，生成版本化 zip 和 SHA-256。
-- [ ] workflow 创建 GitHub Release，并通过仅对 tap 有写权限的 deploy key 自动更新
+- [x] 推送 `v0.1.0` 或手工指定 `0.1.0` 可构建并验证 `Agenterm.app`，生成版本化 zip 和 SHA-256。
+- [x] GitHub Release 已创建；tap deploy key 已配置，首版因 CI runner 差异改由本地发布并更新
   `Casks/agenterm.rb`。
-- [ ] `brew install --cask nickxudotme/tap/agenterm` 可安装 app；`brew uninstall --cask agenterm`
-  可正常卸载。
-- [ ] 安装结束显示与 ScreenOff 风格一致的中英文 caveats，包含 Gatekeeper/quarantine 处理命令和
+- [x] `brew install --cask nickxudotme/tap/agenterm` 可安装 app；本地 cask 演练已验证卸载。
+- [x] 安装结束显示与 ScreenOff 风格一致的中英文 caveats，包含 Gatekeeper/quarantine 处理命令和
   Agenterm GitHub 地址。
-- [ ] cask 通过 Ruby 语法、`brew audit --cask --new-cask`（若自有 tap 规则允许）及本地 artifact
-  安装验证；app 内可执行文件、bundle id `me.nickxu.agenterm`、版本字段与图标存在，cask
-  homepage 指向 `https://agenterm.nickxu.me`。
-- [ ] 发布配置通过格式、shell/Ruby 静态检查；Agenterm 相关构建检查不因发布改动回归。
-- [ ] 最终交付包含 release URL、tap commit、实际安装输出摘要、安装命令和未签名/未公证风险。
-- [ ] 最终 artifacts 反映真实状态：完成、跳过、阻塞和验证结果。
+- [x] cask 通过 Ruby 语法、`brew style` 及公开 release artifact 安装验证；`brew audit --new`
+  仅剩新项目关注度和 Developer ID 签名两项预期限制；app 内可执行文件、bundle id
+  `me.nickxu.agenterm`、版本字段与图标存在，cask homepage 指向 `https://agenterm.nickxu.me`。
+- [x] 发布配置通过格式、shell/Ruby 静态检查；Agenterm 相关构建检查不因发布改动回归。
+- [x] 最终交付包含 release URL、tap commit、实际安装输出摘要、安装命令和未签名/未公证风险。
+- [x] 最终 artifacts 反映真实状态：完成、跳过、阻塞和验证结果。
 
 ## Artifact 决策
 
@@ -56,7 +55,7 @@
 - [x] Gate: Plan Approval — 2026-09-13 用户确认“我们推进 brew 分发”。
 - [x] Gate: Code Review — 2026-09-13 完成 diff、构建脚本、workflow、cask 与本地行为审查。
 - [x] Gate: Release — 2026-09-13 用户确认仓库可公开并批准“走发布”。
-- [ ] Gate: Final Review — 审核 release、tap 更新和实际 brew 安装证据。
+- [x] Gate: Final Review — 2026-09-13 回读 release/tap 并完成实际 brew 安装与启动验证。
 
 ## 步骤
 
@@ -65,6 +64,6 @@
 3. [x] 完成 `tasks.md` 中的实现任务。
 4. [x] 本地构建并验证版本化 Agenterm artifact；对 cask 做本地 URL/SHA 安装演练。
 5. [x] 代码评审 → Gate: Code Review。
-6. [~] 准备两个仓库的提交、tap deploy key 配置步骤和 `v0.1.0` tag → Gate: Release。
-7. [ ] 发布后回读 GitHub Release 与 tap，执行干净的 brew 安装/卸载 smoke test。
-8. [ ] 汇总证据并更新 artifacts → Gate: Final Review。
+6. [x] 准备两个仓库的提交、tap deploy key 配置步骤和 `v0.1.0` tag → Gate: Release。
+7. [x] 发布后回读 GitHub Release 与 tap，执行公开制品的 brew 安装与启动 smoke test。
+8. [x] 汇总证据并更新 artifacts → Gate: Final Review。

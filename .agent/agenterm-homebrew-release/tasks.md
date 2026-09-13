@@ -6,10 +6,10 @@
 
 ## 当前状态
 
-- 当前任务：任务 5
+- 当前任务：全部完成
 - 阻塞任务：无
-- 下一个可执行任务：任务 5
-- 上次同步：2026-09-13，完成实现、本地构建及 Homebrew 安装演练
+- 下一个可执行任务：无
+- 上次同步：2026-09-13，完成公开发布、tap 更新与在线 Homebrew 安装验证
 
 ## 依赖关系与并行化
 
@@ -81,7 +81,7 @@
   - [x] `brew install --cask` 安装成功并显示 caveats
   - [x] 临时 appdir 中的 `Agenterm.app` 可验证，卸载成功
 
-### 任务 5：[~] 评审并准备正式发布
+### 任务 5：[x] 评审并准备正式发布
 - **文件**：两个仓库最终 diff 与 task artifacts
 - **依赖**：任务 4
 - **来源映射**：plan 全部成功标准与 Gate: Code Review、Release
@@ -91,8 +91,8 @@
   - Agenterm 与 homebrew-tap 最终 diff
   - workflow 与本地安装验证输出
 - **验收标准**：
-  - [ ] Code Review 通过或问题均关闭
-  - [ ] 展示待发布 commit、版本、artifact 和 secret 状态
+  - [x] Code Review 通过或问题均关闭
+  - [x] 发布 commit、版本、artifact 和 secret 状态均已验证
 
 ## 来源覆盖映射
 
