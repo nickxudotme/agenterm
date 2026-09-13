@@ -1,0 +1,45 @@
+#!/bin/bash
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+cd "$REPO_ROOT"
+
+VERSION="${1:-}"
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Usage: $0 <major.minor.patch>" >&2
+  exit 1
+fi
+
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+  echo "Agenterm releases must be built on Apple Silicon macOS." >&2
+  exit 1
+fi
+
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)"
+APP_PATH="$TARGET_DIR/release/bundle/osx/Agenterm.app"
+DIST_DIR="$REPO_ROOT/dist"
+ARCHIVE_NAME="Agenterm-$VERSION-arm64.zip"
+ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
+CHECKSUM_PATH="$ARCHIVE_PATH.sha256"
+
+GIT_RELEASE_TAG="v$VERSION" ./script/run --release --dont-open
+
+BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$APP_PATH/Contents/Info.plist")"
+BUNDLE_VERSION="$(plutil -extract CFBundleShortVersionString raw "$APP_PATH/Contents/Info.plist")"
+EXECUTABLE_ARCH="$(lipo -archs "$APP_PATH/Contents/MacOS/agenterm")"
+
+[[ "$BUNDLE_ID" = "me.nickxu.agenterm" ]]
+[[ "$BUNDLE_VERSION" = "$VERSION" ]]
+[[ "$EXECUTABLE_ARCH" = "arm64" ]]
+codesign --verify --deep --strict "$APP_PATH"
+
+mkdir -p "$DIST_DIR"
+rm -f "$ARCHIVE_PATH" "$CHECKSUM_PATH"
+ditto -c -k --keepParent "$APP_PATH" "$ARCHIVE_PATH"
+
+CHECKSUM="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
+printf '%s  %s\n' "$CHECKSUM" "$ARCHIVE_NAME" > "$CHECKSUM_PATH"
+
+echo "Created $ARCHIVE_PATH"
+echo "SHA-256: $CHECKSUM"

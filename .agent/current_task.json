@@ -1,7 +1,7 @@
 {
-  "task": "zmodem-rzsz",
-  "task_dir": ".agent/zmodem-rzsz",
-  "plan_path": ".agent/zmodem-rzsz/plan.md",
-  "updated_by": "execute-plan",
-  "updated_at": "2026-09-12T23:35:42+08:00"
+  "task": "agenterm-homebrew-release",
+  "task_dir": ".agent/agenterm-homebrew-release",
+  "plan_path": ".agent/agenterm-homebrew-release/plan.md",
+  "updated_by": "planning",
+  "updated_at": "2026-09-13T13:00:07+08:00"
 }

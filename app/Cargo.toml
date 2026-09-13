@@ -1046,7 +1046,7 @@ stored_screenshots = []
 [package.metadata.bundle.bin.agenterm]
 category = "public.app-category.developer-tools"
 copyright = "© 2026, Agenterm Contributors"
-identifier = "dev.agenterm.Agenterm"
+identifier = "me.nickxu.agenterm"
 name = "Agenterm"
 resources = ["assets/onboarding"]
 icon = ["channels/oss/icon/no-padding/512x512.png", "channels/oss/icon/no-padding/icon.ico"]

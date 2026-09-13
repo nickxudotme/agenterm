@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the leading v, for example 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      GH_TOKEN: ${{ github.token }}
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release version: $VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Use existing tag for manual reruns
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+            git checkout --detach "$TAG"
+          fi
+
+      - name: Enable sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          brew install protobuf pkgconf
+          ./script/macos/install_build_deps
+          ./script/install_cargo_bundle
+
+      - name: Build release artifact
+        run: ./script/build_macos_release "$VERSION"
+
+      - name: Record artifact metadata
+        run: |
+          set -euo pipefail
+          ZIP="dist/Agenterm-${VERSION}-arm64.zip"
+          SHA256="$(shasum -a 256 "$ZIP" | awk '{print $1}')"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+          {
+            echo "## Agenterm ${VERSION}"
+            echo
+            echo "Apple Silicon macOS build. The app is ad-hoc signed and not notarized."
+            echo
+            PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+            if [ -n "$PREVIOUS_TAG" ]; then
+              echo "Changes since ${PREVIOUS_TAG}:"
+              echo
+              git log --pretty='- %s' "${PREVIOUS_TAG}..HEAD"
+              echo
+            fi
+            echo "SHA-256:"
+            echo
+            echo '```'
+            echo "$SHA256"
+            echo '```'
+          } > release-notes.md
+
+      - name: Ensure tag exists
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Publish GitHub release
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+          else
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+              --title "Agenterm ${VERSION}" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Update Homebrew tap
+        if: env.TAP_DEPLOY_KEY != ''
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$TAP_DEPLOY_KEY" > ~/.ssh/agenterm_homebrew_tap
+          chmod 600 ~/.ssh/agenterm_homebrew_tap
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/agenterm_homebrew_tap -o IdentitiesOnly=yes"
+          git clone "git@github.com:nickxudotme/homebrew-tap.git" /tmp/homebrew-tap
+          cd /tmp/homebrew-tap
+          perl -0pi -e 's/version ".*?"/version "$ENV{VERSION}"/' Casks/agenterm.rb
+          perl -0pi -e 's/sha256 ".*?"/sha256 "$ENV{SHA256}"/' Casks/agenterm.rb
+          ruby -c Casks/agenterm.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/agenterm.rb
+          if git diff --cached --quiet; then
+            echo "Homebrew tap is already up to date."
+          else
+            git commit -m "Update Agenterm to ${VERSION}"
+            git push
+          fi
+
+      - name: Homebrew tap deploy key notice
+        if: env.TAP_DEPLOY_KEY == ''
+        run: echo "TAP_DEPLOY_KEY is not configured, so the Homebrew tap was not updated automatically."
