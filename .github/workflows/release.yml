@@ -62,7 +62,12 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = "arm64"
           brew install protobuf pkgconf
-          ./script/macos/install_build_deps
+          if xcodebuild -help 2>&1 | grep -q -- '-downloadComponent'; then
+            ./script/macos/install_build_deps
+          else
+            xcrun -f metal
+            xcrun -f metallib
+          fi
           ./script/install_cargo_bundle
 
       - name: Build release artifact

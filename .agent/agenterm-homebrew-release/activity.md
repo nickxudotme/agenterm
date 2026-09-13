@@ -15,3 +15,5 @@
   `brew style` 与 Ruby 语法检查通过。
 - 发布前审查补齐手工重跑已有 tag 时从 tag 源码构建的约束，并统一隐藏本地 Drive 的 Share 入口。
 - 用户批准公开 Agenterm 仓库并发布 `v0.1.0`。
+- 首次 release run `34744450173` 在旧 Xcode 不支持 `-downloadComponent` 时失败；workflow 改为
+  按能力下载 Metal toolchain，旧 Xcode runner 则验证预装的 `metal` 与 `metallib`。
