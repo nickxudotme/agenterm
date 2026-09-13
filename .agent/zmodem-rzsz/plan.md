@@ -1,169 +1,98 @@
-# Plan：Agenterm 支持 sz / rz（ZMODEM 文件传输）
+# Plan：完成 ZMODEM，并对齐 WeTERM 的文件传输体验
 
 ## 目标
 
-在 Agenterm 本地终端里支持 `sz`（从远端下载文件到本地）和 `rz`（从本地上传文件到远端），
-参照 WeTERM 的 `zmodem/ssh-zmodem-filter` 做法：在 PTY 字节流上做 ZMODEM 探测与接管，
-接管期间把协议字节从终端渲染中剥离，由客户端完成真正的文件 I/O 和本地文件选择。
+在 `feat/zmodem-rzsz` 上完成可实际使用的 ZMODEM 文件传输。以 WeTERM 的用户行为为参照，
+重新评估已有方案，不把历史实现或单次上传成功当作必须保留的设计。交付本机 GUI 构建、
+逐项功能验收、真实 lrzsz 互通和终端恢复证据，而不仅是协议单测。
 
 ## 当前状态
 
-- 状态：planning
-- 当前步骤：已完成代码调研，产出本 plan
-- 上次同步：2026-09-12，创建 plan
-- 下一步：Gate: Plan Approval
-
-### 调研结论（事实，供后续步骤直接引用）
-
-**WeTERM 参考做法**（`/Users/nickhaoxu/my-stdio/WeTERM`）：
-
-- 后端是独立进程，`ssh2` 输出**先经过 `zmodem/ssh-zmodem-filter`**，字节匹配判定是否启动
-  rzsz 会话；不是 rzsz 时才进入编码转换回传前端。见
-  `docs/附录.WeTERM的SSH登录流程.md:55` 与 `docs/assets/A.3.backend.drawio`。
-- 协议栈用 npm `zmodem.js@^0.1.10`（`yarn.lock:15922`），前端 xterm.js 只负责渲染。
-- CHANGELOG 记录的真实坑位，正是我们设计要覆盖的：`rz` 路径/拖拽/终止、`zmodem` 异常二进制
-  输出、多文件、跨服务器发错机器、citrix 远程目录、rzsz tracing 埋点。
-
-**Agenterm 侧锚点**（本仓库）：
-
-- PTY 读路径：`crates/warp_terminal/src/local_tty/event_loop.rs:199` `pty_read()`，
-  `READ_BUFFER_SIZE = 0x4_0000`，`MAX_LOCKED_READ = 0x1_0000`；读完直接
-  `state.parser.parse_bytes(terminal, &buf[..n], &mut terminal_response_sequences)`。
-- 写路径：同一个 `State::write_list`；终端响应序列已经用
-  `state.write_list.push_back(Cow::Owned(terminal_response_sequences))` 回写 PTY
-  （`event_loop.rs:245`），这是 ZMODEM 回包可以复用的既有通道。
-- 字节广播：`ChannelEventListener::send_pty_read_event()`（`event_listener.rs:87`）→
-  `TerminalModel::on_finish_byte_processing()`（`app/src/terminal/model/terminal_model.rs:3326`）
-  里调用；`async_broadcast` 容量 1024（`app/src/terminal/mod.rs:112`）。
-- PTY 写入 API：`PtyController::write_bytes()`（`writeable_pty/pty_controller.rs:594`），
-  经 `PtyIntent::WriteBytes` → `wire_up_pty_controller_with_surface`
-  （`writeable_pty/terminal_manager_util.rs:71`）。**不要用 `typed_characters_on_terminal`，
-  那会走编辑器/命令语义。**
-- 应用事件上行：`event_proxy.send_app_event()` → `app/src/terminal/event.rs:28` `Event` →
-  `ModelEventDispatcher` → `TerminalView::handle_terminal_event`（`view.rs:11942`）。
-  现有 `RemoteServerReady` 等事件就是这套链路。
-- 文件对话框：`ctx.open_save_file_picker(cb, SaveFilePickerConfiguration)` /
-  `ctx.open_file_picker(cb, FilePickerConfiguration)`，见
-  `crates/warpui_core/src/core/app.rs:4302/4315` 与 `platform/file_picker.rs:129`。
-  现有调用示例：`app/src/editor/view/mod.rs:5053`、`app/src/ai/ai_document_view.rs:1050`。
-- 通知：`ToastStack::handle(ctx)` + `DismissibleToast`（`view.rs:16663`）。
-- 设置：沿用 `maybe_define_setting!` 模式，先例见 `app/src/terminal/warpify/settings.rs`。
-- Feature flag：`crates/warp_features/src/lib.rs:8` `FeatureFlag` 枚举 + `app/src/features.rs:16`
-  `enabled_features()`（Agenterm 侧只在这里开，不进 `DOGFOOD_FLAGS`）。
-- 锁纪律：`TerminalModel` 的 `FairMutex`。`pty_read` 已有"拿不到锁就继续读、读满才阻塞"的策略；
-  **新增逻辑不得在已持锁的调用栈里再 `model.lock()`**（AGENTS.md Terminal Model Locking）。
-
-**依赖选型**：`zmodem2@0.7.2`（MIT OR Apache-2.0，`rust-version 1.85`，no_std，
-heapless，caller-owned I/O，poll/submit 状态机）。本仓库 toolchain 1.92.0，
-`deny.toml` / `about.toml` 的 license 白名单已包含 MIT 与 Apache-2.0，无需改白名单。
-它只依赖 `bitflags 2.x`、`hex 0.4`、`thiserror 1.0`，三者均已在 `Cargo.lock`。
-用户本机已有 homebrew `lrzsz`（`/opt/homebrew/bin/{sz,rz,lsz,lrz}`），可直接做端到端验收，
-但**不作为运行时依赖**。
+- 状态：in_progress
+- 当前步骤：用户授权自主推进；完整 spec 独立 review PASS，tasks T1/T2 开始。
+- 上次同步：2026-09-12，开始实现；GUI cargo check 基线通过。
+- 下一步：完成协议 worker 和 detector，集成 PTY，再完成 GUI 与真实链路验证。
+- 当前分支：`feat/zmodem-rzsz`，HEAD `9fd3f9f`，跟踪同名 origin 分支。
+- 本次调查详情：`investigation.md`。旧 activity 中的实测结论只作为历史线索，不当作本次验证。
+- WeTERM 源码子模块不可访问；参照来自本地仓库文档及本机安装的 WeTERM 3.5.7 应用代码。
 
 ## Scope 与边界
 
-- In scope:
-  - 在 PTY 读路径新增 ZMODEM **下载探测与接管**（`sz` 方向）：识别 `ZRQINIT`/`ZFILE`
-    后接管字节流，用 `zmodem2::Receiver` 收文件，写本地磁盘。
-  - 新增 **上传入口**（`rz` 方向）：Command Palette 动作 + 可选右键菜单项，
-    选本地文件后用 `zmodem2::Sender` 发送。
-  - `ZmodemTransfer` 面板/状态视图：文件名、字节数、进度、取消按钮、完成/失败 toast。
-    复用现有 `DismissibleToast` 与 `ssh_file_upload.rs` 的展示风格（不复用其 sftp 逻辑）。
-  - 传输期间**抑制协议字节渲染**（不把二进制喷进 scrollback），并在终端留下
-    一行人类可读的传输记录。
-  - 本地设置：默认下载目录、是否启用 ZMODEM、上传默认目录（可选）。
-  - 定向单元测试（探测器 + 状态机驱动）+ 本机 `sz`/`rz` 端到端验收。
-- Out of scope:
-  - 依赖或调用外部 `lrzsz` 二进制。
-  - SFTP / scp / 拖拽上传（现有 `SshDragAndDrop` 走 sftp，本次不动）。
-  - 修改 SSH 配置、远端 RC、跳板机策略。
-  - 远端自动部署 Warp 组件；本方案是纯客户端实现，远端只需有 `sz`/`rz`。
-  - XMODEM / YMODEM / Kermit。
-  - 目录递归传输（`sz -r` 的目录展开语义）、断点续传之外的 ZMODEM 扩展
-    （ZCHALLENGE 解密、ZCOMPRLZW 压缩）。
-  - 自动上传触发（本次上传必须用户显式发起）。
-- 假设（**若与预期不符请纠正，这三点直接决定实现范围**）：
-  1. 下载走**自动探测**（WeTERM 同款 zmodemfilter）；上传走**显式入口**，
-     因为 `rz` 需要远端先发 `ZRINIT`，客户端无法凭空触发。
-  2. 下载落地用**原生保存对话框**（`open_save_file_picker`），默认目录为上次选择或
-     `~/Downloads`；这是最可预测且已有多处先例的路径。
-  3. 协议栈用 **`zmodem2` crate**，不自己实现 CRC/ZDLE/协商。
-- 关键约束/不变量：
-  - **不改共享 PTY 读路径的默认行为**：未探测到 ZMODEM 时，字节必须原样进入 ANSI 解析器，
-    现有渲染/录制/共享会话链路零变化。
-  - **不新增 `model.lock()` 调用点**：接管逻辑在 event loop 线程内完成，
-    只通过 `event_listener` / `send_app_event` 上行，不在持锁路径里取锁。
-  - **PTY 写入只走 `PtyController::write_bytes`**（即 `Message::Input`），
-    不直接碰 `mio_channel`，避免绕开 `kill_buffer` 拆分和断连处理。
-  - **不阻塞 event loop**：文件 I/O 在后台/主线程异步任务里做；协议状态机本身是
-    纯内存 poll/submit，可以在 event loop 内驱动，但每个 poll 循环必须有字节/回合上限。
-  - **传输可取消**：任何时候取消都必须能发 abort 序列并恢复普通渲染，
-    不能把终端留在永久接管态。
-  - 不支持/失败时**安全回退**：把字节交还给 ANSI 解析器（允许显示乱码），
-    而不是吞掉输出或冻结终端。
-  - 不记录文件内容、不记录完整命令行到日志。
-- 需要重新获批的变化：新增第三方依赖（已在下方 Artifact 决策里显式列出并说明理由）、
-  修改共享 event loop 的字节处理顺序、把 ZMODEM 探测扩展到非 SSH 本地会话。
+- In scope：本机 macOS GUI；本地 PTY，以及其上普通 SSH、交互式多跳 SSH 的 rz/sz。
+  不依赖 SFTP、端口转发、ProxyJump 或远端 Warpify。普通 SSH 不等于应用的 network-backed PTY。
+- 功能对齐：远端 `rz` 自动弹多文件选择框；远端 `sz` 在接收前选择一次目录；记住上次目录，
+  可设置固定下载目录；重名文件可跳过、重命名或显式覆盖；菜单入口、ZMODEM 拖拽上传模式、
+  可配置的远端 rz 命令；多文件进度及结果；取消、超时、断连恢复。
+- WeTERM 的跨终端转发是实验室选项，不是基础 rz/sz。为避免把“完整对齐”偷偷缩成两条命令，
+  本计划包含默认关闭的跨终端转发：显式选择目标、绑定两端会话、流控和取消联动。
+  先验收基础双向传输，再验收此能力；未经用户调整 scope，不将它静默省略。
+- UI 沿用 Agenterm 的 WarpUI、文件选择器、Settings 和终端 Block；不照搬 Electron 或品牌外观。
+  添加设置时同步提供相应 Command Palette 命令；菜单必须独立可达，不借此重做整个命令面板。
+- 默认安全策略：不静默覆盖已有文件；失败或取消不把残缺文件发布成成功文件；文件名视为不可信输入。
+  不执行远端给出的命令，不把文件名中的控制序列送进终端解析器。
+- 每个 PTY 独立传输，异步选择结果绑定传输代次；切标签、关闭终端、旧对话框返回不能串台。
+- 有界流式 I/O；禁止整文件 Vec 缓存、UI 同步写盘或持 TerminalModel 锁读盘。
+  磁盘写入和传输完成必须有明确的确认顺序，不提前宣告成功。
+- 保留“原始 PTY 字节在 ANSI 解析前分流”的方向，但不锁定现有 `ZmodemSession` 适配器。
+  优先评估并修正已有 `zmodem2`；用互通矩阵证明其适用性。确需修改协议库时使用可维护的、
+  有许可证和测试的局部依赖补丁，不继续在应用层临时替换协议帧。
+- 不默认引入 Node/JS 运行时或外部 lrzsz 作为产品依赖；lrzsz 是测试对端。
+  若 native 库不能达到契约，先提交选型证据和成本，再批准替代方案。
+- Out of scope：SSH bootstrap 修复、Drive 改造、SFTP 重写、目录递归、X/YMODEM、会话中断后断点续传。
+  协议内校验失败重传仍属范围。单文件上限明确为 `u32::MAX`，超限必须在传输前告知用户。
+- Windows/Linux/TUI 的完整体验不据本机验证宣称完成；共享代码必须不破坏这些构建路径。
+  不支持的 surface 应明确禁用，不能静默接管字节后没有 UI 接续。
+- 本轮只本地实现和验证；不 commit、不 push、不部署，不访问或变更生产机器。
+  现网多跳链路验收需要单独确认目标及测试文件；先用本地可控 PTY/SSH fixture 验证。
+- 需要重新获批的变化：新增运行时/外部可执行依赖、超出传输范围重构、生产访问、
+  取消上述功能项或改变平台交付范围、调整默认覆盖行为。
 
 ## 成功标准
 
-- [ ] 本地 shell 里跑 `sz <file>`，Agenterm 弹出保存对话框，保存后本地文件与远端
-      `md5`/字节数一致；终端显示一行传输记录，scrollback 没有二进制乱码。
-- [ ] 通过显式入口选本地文件，远端 `rz` 能收到同名同内容文件（用 homebrew `rz` 在本机验收）。
-- [ ] 取消/中断（传输中取消、`Ctrl-C`、远端 abort）都能退出接管态，终端继续可用。
-- [ ] 非 ZMODEM 输出（含二进制但非协议的流，例如 `cat /bin/ls`）行为与今天完全一致，
-      现有终端回归测试无变化。
-- [ ] 新增定向测试：探测器在真实 `sz` 前导字节上触发、在随机二进制上不触发；
-      `Receiver`/`Sender` 状态机驱动在合成 wire 字节上走完一轮。
-- [ ] `./script/format`、presubmit 的 Clippy 三段、相关 nextest 全部通过。
-- [ ] 最终交付：变更摘要、验证证据（端到端截图/日志、测试命令输出）、
-      依赖新增说明、以及明确列出的剩余风险（见下）。
-- [ ] 最终 artifacts 反映真实状态：完成、跳过、阻塞和验证结果。
+- [ ] 真实 GUI 的 `rz`/`sz` 在普通 shell 和 SSH 路径成功；多跳 SSH 不依赖转发能力。
+- [ ] 文本、全部 256 种字节、零字节、中文/空格名称、多文件及至少 256 MiB 文件双向传输，
+  逐文件比对长度和 SHA-256；对端正常退出，不能用 kill 对端掩盖协议关闭失败。
+- [ ] 逐字节分片、随机分片、协议结尾与 shell prompt 同一 read，输出不丢、不重复、不乱码。
+  普通输出末尾 `*`/`**` 在有界延迟内原样显示，不永久滞留在 detector。
+- [ ] CRC 错误重传、重复握手、慢对端、无任何新输入的静默超时都有有界恢复和明确结果。
+- [ ] 取消选文件、取消目录、传输中 Ctrl-C/取消按钮、远端 abort、关闭 tab、断连、磁盘失败均能退出，
+  不留持续传输队列，不出现成功 toast；恢复后可运行下一条 shell 命令。
+- [ ] 两个终端并行传输、同名文件和异步对话框回调不混数据；跨终端转发明确绑定所选目标，
+  取消/失败两端联动且不影响第三个终端。
+- [ ] 下载路径穿越、绝对路径、控制字符名称、符号链接/重名竞争、超限和源文件变化有测试覆盖。
+- [ ] 设置、拖拽模式、目录选择、重名策略、多文件结果在 GUI 中可用；普通路径拖入/粘贴不回归。
+- [ ] 协议队列和 I/O 缓存有固定上限，256 MiB 传输不分配文件大小级别缓存；记录峰值和吞吐。
+  在 spec 中落实具体内存及调度预算，并用慢磁盘/慢 PTY 测试验证背压和取消响应。
+- [ ] `./script/format --check`、presubmit 中三段 Clippy、相关 nextest 和 GUI 构建通过。
+  全 workspace 检查若遇到无关既有问题，交付精确阻塞及基线对比，不能写成全通过。
+- [ ] 最终交付包含本地可启动构建路径、版本确认、截图/交互证据、测试输出、功能对齐表和剩余风险。
+- [ ] 最终 artifacts 反映真实状态；未验证的平台和现网链路明确列出，不以单测替代真实使用验收。
 
 ## Artifact 决策
 
-- `spec.md`: **required** — 这是跨 `warp_terminal`（共享 PTY 读路径）、`app/src/terminal`
-  （事件/UI/设置）、依赖新增的横切行为变化，且探测阈值、接管边界、失败回退都需要
-  长期可查的设计记录。用 `spec-writing` 新建
-  `docs/design-docs/terminal/zmodem-rzsz/spec.md`。
-- `tasks.md`: **required** — 涉及依赖接入、event loop 改造、新的 model/view、设置、测试，
-  需要拆分给 implementer 并写明 lock/事件链路的 context。
-- 依赖新增：`zmodem2 = "0.7.2"`（MIT OR Apache-2.0）。理由：ZMODEM 的 CRC16/CRC32、
-  ZDLE 转义、ZRINIT 能力协商、ZRPOS 断点续传都属于易错细节，且本功能是纯增量特性、
-  不值得自建并维护一套协议栈；license 已在 `deny.toml`/`about.toml` 白名单内。
-  **此项需要用户明确批准**（新增第三方依赖）。
+- `spec.md`: required，使用 `spec-writing` 创建 `docs/design-docs/terminal/zmodem-rzsz/spec.md`。
+  已创建草稿，目前只有 §1.1 起草，其余小节未开始。需要定义会话归属、字节消费边界、
+  文件提交、取消/计时器、UI 契约、
+  协议依赖选型和跨终端转发；重要行为变化在 spec 获批后实现。
+- `tasks.md`: required，使用 `task-planning`，拆分多模块实现及明确测试前置依赖。
+- `investigation.md`: required，保存参照来源、源代码证据、已验证基线、尚待复现的历史推断。
+- `reflection.md`: 仅本任务的调查经验和 promotion 建议，不自动写入全局 memory/skill。
 
 ## 质量门禁
 
-- [ ] Gate: Plan Approval — 批准这个 `plan.md` 后才能开始执行。
-- [ ] Gate: Spec Review — 涉及 `spec.md`，由 `spec-writing` 在 spec 完成时 present。
-- [ ] Gate: Code Review — 涉及共享 PTY 读路径与新增依赖，用 `code-review` Standard 模式。
-- [ ] Gate: Final Review — 批准最终结果、验证证据和提交准备状态。
+- [x] Gate: Plan Approval，2026-09-12 用户回复“可以”，批准完整功能范围、实现边界和本地交付标准。
+- [x] Gate: Spec Review，用户委托自主确认；独立评审修订三项后 PASS，进入实现。
+- [ ] Gate: Code Review，使用 `code-review` Standard 模式，重点审核 PTY 锁、背压、路径安全、生命周期。
+- [ ] Gate: Final Review，审核真实文件/协议/GUI 证据；提交推送需要用户另行明确触发。
 
 ## 步骤
 
-1. [x] 调研 WeTERM 的 zmodemfilter 架构与 Agenterm 的 PTY 读/写/事件链路，确定锚点。
-2. [ ] 调用 `spec-writing` 起草 `docs/design-docs/terminal/zmodem-rzsz/spec.md`
-      → Gate: Spec Review。重点写清：探测触发条件与误判边界、接管期间的字节所有权、
-      失败回退、取消语义、与 SSH Warpify / 共享会话 / block bootstrap 的交互、
-      依赖与 license 理由、测试策略。
-3. [ ] 调用 `task-planning` 拆分 `tasks.md`。
-4. [ ] 完成 `tasks.md` 中的所有任务。
-5. [ ] 本机端到端验收：用 homebrew `lrzsz` 在真实 shell 里跑 `sz` / `rz`，
-      覆盖成功、取消、非协议二进制、多文件。
-6. [ ] 定向回归 + `./script/format` + presubmit Clippy。
-7. [ ] 代码评审 → 调用 `code-review` → Gate: Code Review。
-8. [ ] 准备最终交接 → Gate: Final Review（未获明确要求前不提交、不推送）。
-
-## 已知风险与需人工确认项
-
-- **误判风险**：ZMODEM 前导是 `**\x18B...`（ZHEX 头）这类短字节序列。探测器必须要求
-  完整合法 header + CRC 通过才进入接管，且加一次性超时；否则会把正常二进制输出
-  误吞成乱码。这是 spec 必须钉死的边界。
-- **编码与 8-bit 通道**：ZMODEM 需要 8-bit clean 通道。如果远端/本地 termios 或
-  Warpify bootstrap 对字节做了转义，协议会失败。需要在 spec 里确认当前 PTY 配置
-  是否满足，并准备失败回退。
-- **远端必须有 sz/rz**：纯客户端实现不能凭空提供能力；验收依赖远端已装 `lrzsz`。
-  本方案不安装、不修改远端。
-- **跨会话串行**：同一时刻只允许一个 ZMODEM 会话；WeTERM CHANGELOG 里的
-  "跨服务器传输发错机器"就是这类坑，spec 需要明确 session 绑定。
+1. [x] 接手分支、阅读旧 plan/activity 和全量 feature diff，核查 WeTERM 安装包和现有测试基线。
+2. [x] 调用 `spec-writing`：将行为对齐表转为需求/设计；通过针对 lrzsz 的独立复现评估协议库，
+   区分适配器问题与库问题；完成 Gate: Spec Review。
+3. [x] 调用 `task-planning` 创建 `tasks.md`，明确红绿回归、并行边界和实现顺序。
+4. [~] 调用 `task-execution`，完成 `tasks.md` 中的所有任务。
+5. [ ] 执行协议、真实 event loop、文件 I/O、GUI 和本地 SSH 链路验收，验证失败后的终端可用性。
+6. [ ] 跑格式、lint、构建和回归；更新对齐矩阵与性能/内存证据。
+7. [ ] 调用 `code-review`，修复成立的问题并重新验证，完成 Gate: Code Review。
+8. [ ] 交付本地可试用构建和真实验收记录，Gate: Final Review；不自动 commit/push。

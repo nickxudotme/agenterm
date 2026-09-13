@@ -4,6 +4,7 @@ members = [
   "app",
 ]
 resolver = "2"
+exclude = ["vendor/zmodem2"]
 
 # Include all members except serve-wasm (since it's a helper helper for serving
 # wasm binaries and not something we want to regularly compile or run
@@ -560,6 +561,7 @@ inherits = "dev"
 opt-level = "s"
 
 [patch.crates-io]
+zmodem2 = { path = "vendor/zmodem2" }
 # Pinned to the merge commit of servo/core-foundation-rs#746, which fixes a
 # double-retain bug in `CTFontCollection::get_descriptors` that leaks the
 # CoreText font-descriptor NSArray on every call. The fix is not yet in any

@@ -1,0 +1,18 @@
+[package]
+name = "zmodem2"
+version = "0.7.2"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Jarkko Sakkinen <jarkko.sakkinen@iki.fi>"]
+description = "ZMODEM file transfer protocol (Agenterm bounded-runtime patches)"
+repository = "https://codeberg.org/jarkko/zmodem2.git"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+bitflags = "2.4"
+hex = "0.4.3"
+thiserror = "1.0"

@@ -136,31 +136,7 @@ pub enum Event {
         image_data: Vec<u8>,
         image_protocol: ImageProtocol,
     },
-    /// A remote `sz` began a ZMODEM download.
-    ZmodemDownloadStarted {
-        file_name: Option<String>,
-    },
-    /// A remote `rz` is waiting for files to be sent.
-    ZmodemUploadRequested,
-    /// Progress for the in-flight ZMODEM transfer.
-    ZmodemProgress {
-        file_name: String,
-        bytes_transferred: u64,
-        bytes_total: u64,
-    },
-    /// A chunk of received file data, to be appended to the file in flight.
-    ZmodemFileData {
-        name: String,
-        data: Vec<u8>,
-    },
-    /// A file finished transferring.
-    ZmodemFileCompleted {
-        file_name: String,
-    },
-    /// The transfer ended; `error` is `None` on success.
-    ZmodemFinished {
-        error: Option<String>,
-    },
+    Zmodem(warp_terminal::zmodem::runtime::TransferEvent),
     BootstrapPrecmdDone,
     /// A pluggable notification triggered via OSC 9 or OSC 777 escape sequences.
     /// External programs can use this to trigger notifications in Warp.
@@ -197,26 +173,14 @@ impl From<warp_terminal::event::Event> for Event {
                 image_data,
                 image_protocol,
             },
-            warp_terminal::event::Event::ZmodemDownloadStarted { file_name } => {
-                Self::ZmodemDownloadStarted { file_name }
-            }
-            warp_terminal::event::Event::ZmodemUploadRequested => Self::ZmodemUploadRequested,
-            warp_terminal::event::Event::ZmodemProgress {
-                file_name,
-                bytes_transferred,
-                bytes_total,
-            } => Self::ZmodemProgress {
-                file_name,
-                bytes_transferred,
-                bytes_total,
-            },
-            warp_terminal::event::Event::ZmodemFileData { name, data } => {
-                Self::ZmodemFileData { name, data }
-            }
-            warp_terminal::event::Event::ZmodemFileCompleted { file_name } => {
-                Self::ZmodemFileCompleted { file_name }
-            }
-            warp_terminal::event::Event::ZmodemFinished { error } => Self::ZmodemFinished { error },
+            warp_terminal::event::Event::Zmodem(event) => Self::Zmodem(event),
+            // Legacy core events cannot carry file contents into the GUI.
+            warp_terminal::event::Event::ZmodemDownloadStarted { .. }
+            | warp_terminal::event::Event::ZmodemUploadRequested
+            | warp_terminal::event::Event::ZmodemProgress { .. }
+            | warp_terminal::event::Event::ZmodemFileData { .. }
+            | warp_terminal::event::Event::ZmodemFileCompleted { .. }
+            | warp_terminal::event::Event::ZmodemFinished { .. } => Self::MouseCursorDirty,
         }
     }
 }
@@ -530,19 +494,7 @@ impl Debug for Event {
             }
             Event::TextSelectionChanged => write!(f, "TextSelectionChanged"),
             Event::ShellSpawned(shell_type) => write!(f, "ShellSpawned({shell_type:?})"),
-            Event::ZmodemDownloadStarted { .. } => write!(f, "ZmodemDownloadStarted"),
-            Event::ZmodemUploadRequested => write!(f, "ZmodemUploadRequested"),
-            Event::ZmodemProgress { file_name, .. } => {
-                write!(f, "ZmodemProgress({file_name})")
-            }
-            Event::ZmodemFileData { name, data } => {
-                // Log the size only; file contents never belong in logs.
-                write!(f, "ZmodemFileData({name}, {} bytes)", data.len())
-            }
-            Event::ZmodemFileCompleted { file_name } => {
-                write!(f, "ZmodemFileCompleted({file_name})")
-            }
-            Event::ZmodemFinished { error } => write!(f, "ZmodemFinished({error:?})"),
+            Event::Zmodem(_) => write!(f, "Zmodem"),
             Event::ImageReceived { image_id, .. } => {
                 write!(f, "ImageReceived(image_id: {image_id})")
             }

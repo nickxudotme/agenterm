@@ -7,6 +7,7 @@ use hex::FromHexError;
 use itertools::Itertools as _;
 use warp_util::AsciiDebug;
 
+use crate::zmodem::runtime::TransferEvent;
 use crate::{ClipboardType, ImageProtocol};
 /// Emitted upon completion of an executor command that goes through the pty, such as the
 /// InBandCommandExecutor.
@@ -151,6 +152,8 @@ pub enum InBandCommandOutputDecodingError {
 }
 #[derive(Clone)]
 pub enum Event {
+    /// Ordered metadata for this terminal's native file transfer.
+    Zmodem(TransferEvent),
     MouseCursorDirty,
     ClipboardStore(ClipboardType, String),
     ClipboardLoad(

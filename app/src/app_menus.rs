@@ -51,13 +51,6 @@ fn file_menu() -> Menu {
                 Some(Keystroke::parse("cmd-t").expect("valid keystroke")),
             )),
             MenuItem::Separator,
-            // Uploads need an explicit trigger because `rz` waits for the
-            // sender; there is no remote signal the client could detect.
-            action_item(
-                "Send Files to Remote (rz)…",
-                CustomAction::SendFilesWithZmodem,
-            ),
-            MenuItem::Separator,
             MenuItem::Custom(CustomMenuItem::new(
                 "Close Tab",
                 dispatch_action(CustomAction::CloseTab),

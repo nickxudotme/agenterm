@@ -332,11 +332,17 @@ pub enum TerminalAction {
     AttemptLoginGatedFeature,
     StartFileDropTarget,
     StopFileDropTarget,
-    /// Sends local files to a remote `rz` over ZMODEM.
-    ///
-    /// Uploads need an explicit trigger because `rz` waits for the sender to
-    /// start; there is no remote signal the client could detect on its own.
     SendFilesWithZmodem,
+    CancelZmodemTransfer {
+        id: Option<warp_terminal::zmodem::runtime::TransferId>,
+    },
+    DismissZmodemStatus {
+        id: warp_terminal::zmodem::runtime::TransferId,
+    },
+    ToggleZmodemEnabled,
+    ToggleZmodemAskDirectory,
+    ToggleZmodemDrag,
+    ToggleZmodemCrossTransfer,
     OpenTeamSettingsPage,
     SetMarkedText {
         marked_text: UserInput<String>,
@@ -671,6 +677,12 @@ impl fmt::Debug for TerminalAction {
             AttemptLoginGatedFeature => write!(f, "AttemptLoginGatedFeature"),
             StartFileDropTarget => write!(f, "StartFileDropTarget"),
             SendFilesWithZmodem => write!(f, "SendFilesWithZmodem"),
+            CancelZmodemTransfer { id } => write!(f, "CancelZmodemTransfer({id:?})"),
+            DismissZmodemStatus { id } => write!(f, "DismissZmodemStatus({id})"),
+            ToggleZmodemEnabled => write!(f, "ToggleZmodemEnabled"),
+            ToggleZmodemAskDirectory => write!(f, "ToggleZmodemAskDirectory"),
+            ToggleZmodemDrag => write!(f, "ToggleZmodemDrag"),
+            ToggleZmodemCrossTransfer => write!(f, "ToggleZmodemCrossTransfer"),
             StopFileDropTarget => write!(f, "StopFileDropTarget"),
             RunNativeShellCompletions { buffer_text, .. } => {
                 write!(f, "RunNativeShellCompletions({buffer_text:?})")

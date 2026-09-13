@@ -1,168 +1,258 @@
-//! Writes ZMODEM file transfers to disk.
-//!
-//! The PTY event loop drives the protocol but cannot block on file I/O or open
-//! a save dialog, so it emits progress events instead. This model consumes
-//! those events, buffers incoming file data, and asks the user where to save
-//! each download.
+//! Per-terminal metadata. Business file I/O belongs exclusively to the protocol worker.
 
-use std::fs::File;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use warp_terminal::zmodem::runtime::{
+    FileOutcome, MAX_FILES, Role, TransferEvent, TransferId, TransferOutcome,
+};
 
-use warpui::{AppContext, Entity, ModelContext, SingletonEntity, WindowId};
-
-use crate::view_components::DismissibleToast;
-use crate::workspace::ToastStack;
-
-/// Default location offered for downloads when nothing was chosen before.
-fn default_download_directory() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|dirs| dirs.download_dir().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferPhase {
+    SelectingExplicitUpload,
+    SelectingRequested,
+    Running,
+    Cancelling,
 }
 
-/// A file being received from the remote side.
-struct PendingDownload {
-    name: String,
-    bytes: Vec<u8>,
-    bytes_total: u64,
+#[derive(Clone, Debug)]
+pub(crate) struct FileStatus {
+    pub name: String,
+    pub bytes: u64,
+    pub total: Option<u64>,
+    pub outcome: Option<FileOutcome>,
 }
 
-/// Tracks one ZMODEM transfer and persists the files that arrive.
+#[derive(Debug)]
+pub(crate) struct ActiveTransfer {
+    pub id: TransferId,
+    pub role: Role,
+    pub phase: TransferPhase,
+    pub current_file: Option<FileStatus>,
+    pub files: Vec<FileStatus>,
+}
+
+#[derive(Debug)]
+pub(crate) struct TransferSummary {
+    pub id: TransferId,
+    pub role: Role,
+    pub outcome: TransferOutcome,
+    pub files: Vec<FileStatus>,
+}
+
 #[derive(Default)]
-pub struct ZmodemTransfer {
-    /// Data buffered for the file currently in flight.
-    pending: Option<PendingDownload>,
-    /// Directory last used for a download, so the next dialog starts there.
-    last_directory: Option<PathBuf>,
+pub(crate) struct ZmodemTransfer {
+    pub active: Option<ActiveTransfer>,
+    pub last: Option<TransferSummary>,
+    newest_id: TransferId,
 }
-
-impl Entity for ZmodemTransfer {
-    type Event = ();
-}
-
-impl SingletonEntity for ZmodemTransfer {}
 
 impl ZmodemTransfer {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn begin_explicit_upload(&mut self, id: TransferId) -> bool {
+        if self.active.is_some() || id <= self.newest_id {
+            return false;
+        }
+        self.begin(id, Role::Upload, TransferPhase::SelectingExplicitUpload);
+        true
     }
 
-    /// Records progress for the file in flight, creating it if needed.
-    pub fn note_progress(&mut self, file_name: String, _bytes_transferred: u64, bytes_total: u64) {
-        match self.pending.as_mut() {
-            Some(pending) => {
-                if pending.name != file_name {
-                    // A new file started without a completion for the previous
-                    // one; keep the newer file and drop the stale buffer.
-                    self.pending = Some(PendingDownload {
-                        name: file_name,
-                        bytes: Vec::new(),
-                        bytes_total,
-                    });
-                } else {
-                    pending.bytes_total = bytes_total;
-                }
-            }
-            None => {
-                self.pending = Some(PendingDownload {
-                    name: file_name,
-                    bytes: Vec::new(),
-                    bytes_total,
+    fn begin(&mut self, id: TransferId, role: Role, phase: TransferPhase) {
+        self.newest_id = id;
+        self.last = None;
+        self.active = Some(ActiveTransfer {
+            id,
+            role,
+            phase,
+            current_file: None,
+            files: Vec::new(),
+        });
+    }
+
+    /// Returns true only for a new request that needs a picker.
+    pub fn request(&mut self, id: TransferId, role: Role) -> bool {
+        if id <= self.newest_id {
+            return false;
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.phase != TransferPhase::SelectingExplicitUpload)
+        {
+            return false;
+        }
+        self.begin(id, role, TransferPhase::SelectingRequested);
+        true
+    }
+
+    pub fn is_selecting(&self, id: TransferId, role: Role, explicit: bool) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.id == id
+                && active.role == role
+                && active.phase
+                    == if explicit {
+                        TransferPhase::SelectingExplicitUpload
+                    } else {
+                        TransferPhase::SelectingRequested
+                    }
+        })
+    }
+
+    pub fn start(&mut self, id: TransferId) {
+        if let Some(active) = self.active.as_mut().filter(|active| active.id == id) {
+            active.phase = TransferPhase::Running;
+        }
+    }
+
+    pub fn cancel(&mut self, id: TransferId) -> bool {
+        let Some(active) = self.active.as_mut().filter(|active| active.id == id) else {
+            return false;
+        };
+        if active.phase == TransferPhase::SelectingExplicitUpload {
+            self.finish(id, TransferOutcome::Cancelled);
+        } else {
+            active.phase = TransferPhase::Cancelling;
+        }
+        true
+    }
+
+    /// Applies ordered runtime metadata, rejecting stale or foreign events.
+    pub fn apply(&mut self, event: &TransferEvent) -> bool {
+        let (id, role) = match event {
+            TransferEvent::Requested { .. } => return false,
+            TransferEvent::FileStarted { id, role, .. }
+            | TransferEvent::Progress { id, role, .. }
+            | TransferEvent::FileResult { id, role, .. }
+            | TransferEvent::Finished { id, role, .. } => (*id, *role),
+        };
+        let Some(active) = self
+            .active
+            .as_mut()
+            .filter(|active| active.id == id && active.role == role)
+        else {
+            return false;
+        };
+        match event {
+            TransferEvent::Requested { .. } => return false,
+            TransferEvent::FileStarted { name, size, .. } => {
+                active.current_file = Some(FileStatus {
+                    name: display_text(name),
+                    bytes: 0,
+                    total: *size,
+                    outcome: None,
                 });
             }
-        }
-    }
-
-    /// Appends received data to the file in flight.
-    pub fn append_data(&mut self, data: &[u8]) {
-        if let Some(pending) = self.pending.as_mut() {
-            pending.bytes.extend_from_slice(data);
-        }
-    }
-
-    /// Finishes the file in flight, prompting for a destination and writing it.
-    ///
-    /// The dialog is asynchronous, so this returns as soon as it is shown.
-    pub fn finish_file(&mut self, window_id: WindowId, ctx: &mut ModelContext<Self>) {
-        let Some(pending) = self.pending.take() else {
-            return;
-        };
-
-        let directory = self
-            .last_directory
-            .clone()
-            .unwrap_or_else(default_download_directory);
-        let config = warpui::platform::file_picker::SaveFilePickerConfiguration::new()
-            .with_default_filename(pending.name.clone())
-            .with_default_directory(directory.clone());
-        self.last_directory = Some(directory);
-
-        let name = pending.name.clone();
-        let bytes = pending.bytes.clone();
-
-        ctx.open_save_file_picker(
-            move |path_opt: Option<String>, ctx: &mut AppContext| {
-                let Some(path) = path_opt else {
-                    // The user cancelled; the transfer already happened, so
-                    // there is nothing to undo beyond discarding the buffer.
-                    return;
+            TransferEvent::Progress {
+                name, bytes, total, ..
+            } => {
+                active.current_file = Some(FileStatus {
+                    name: display_text(name),
+                    bytes: *bytes,
+                    total: *total,
+                    outcome: None,
+                });
+            }
+            TransferEvent::FileResult {
+                name,
+                bytes,
+                outcome,
+                ..
+            } => {
+                let file = FileStatus {
+                    name: display_text(name),
+                    bytes: *bytes,
+                    total: active.current_file.as_ref().and_then(|file| file.total),
+                    outcome: Some(outcome.clone()),
                 };
-                match write_file(Path::new(&path), &bytes) {
-                    Ok(written) => {
-                        ToastStack::handle(ctx).update(ctx, |stack, ctx| {
-                            stack.add_ephemeral_toast(
-                                DismissibleToast::success(format!(
-                                    "Saved {name} ({written} bytes)"
-                                )),
-                                window_id,
-                                ctx,
-                            );
-                        });
-                    }
-                    Err(error) => {
-                        log::warn!("Failed to write ZMODEM download: {error}");
-                        ToastStack::handle(ctx).update(ctx, |stack, ctx| {
-                            stack.add_ephemeral_toast(
-                                DismissibleToast::error(format!("Could not save {name}: {error}")),
-                                window_id,
-                                ctx,
-                            );
-                        });
-                    }
+                active.current_file = Some(file.clone());
+                if active.files.len() == MAX_FILES {
+                    active.files.remove(0);
                 }
-            },
-            config,
-        );
+                active.files.push(file);
+            }
+            TransferEvent::Finished { outcome, .. } => {
+                self.finish(id, outcome.clone());
+            }
+        }
+        true
     }
 
-    /// Reports the end of a transfer through a toast.
-    pub fn finish_transfer(
-        &mut self,
-        error: Option<String>,
-        window_id: WindowId,
-        ctx: &mut ModelContext<Self>,
-    ) {
-        // A file that never emitted a completion still holds buffered data;
-        // it is dropped here so the next transfer starts clean.
-        self.pending = None;
-        ToastStack::handle(ctx).update(ctx, |stack, ctx| {
-            let toast = match error {
-                Some(message) => {
-                    DismissibleToast::error(format!("ZMODEM transfer failed: {message}"))
-                }
-                None => DismissibleToast::success("ZMODEM transfer complete".to_owned()),
-            };
-            stack.add_ephemeral_toast(toast, window_id, ctx);
+    pub fn finish(&mut self, id: TransferId, outcome: TransferOutcome) {
+        if self.active.as_ref().is_none_or(|active| active.id != id) {
+            return;
+        }
+        let active = self.active.take().expect("matching active transfer");
+        self.last = Some(TransferSummary {
+            id,
+            role: active.role,
+            outcome,
+            files: active.files,
         });
+    }
+
+    pub fn status_text(&self) -> Option<String> {
+        if let Some(active) = &self.active {
+            let direction = direction(active.role);
+            let phase = match active.phase {
+                TransferPhase::SelectingExplicitUpload | TransferPhase::SelectingRequested => {
+                    "Choose files or directory"
+                }
+                TransferPhase::Running => "Connecting",
+                TransferPhase::Cancelling => return Some(format!("{direction}: cancelling")),
+            };
+            return Some(match &active.current_file {
+                Some(file) => format!("{direction}: {}", file_status(file)),
+                None => format!("{direction}: {phase}"),
+            });
+        }
+        self.last.as_ref().map(|last| {
+            let completed = last
+                .files
+                .iter()
+                .filter(|file| matches!(file.outcome, Some(FileOutcome::Completed)))
+                .count();
+            let skipped = last
+                .files
+                .iter()
+                .filter(|file| matches!(file.outcome, Some(FileOutcome::Skipped)))
+                .count();
+            let outcome = match &last.outcome {
+                TransferOutcome::Completed => "complete".to_owned(),
+                TransferOutcome::Cancelled => "cancelled".to_owned(),
+                TransferOutcome::RemoteCancelled => "cancelled by remote".to_owned(),
+                TransferOutcome::Failed(error) => {
+                    format!("failed: {}", display_text(&error.message))
+                }
+            };
+            format!(
+                "{} {outcome}: {completed} completed, {skipped} skipped",
+                direction(last.role)
+            )
+        })
     }
 }
 
-/// Writes `bytes` to `path`, creating or truncating the file.
-fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<usize> {
-    let mut file = File::create(path)?;
-    file.write_all(bytes)?;
-    Ok(bytes.len())
+fn direction(role: Role) -> &'static str {
+    match role {
+        Role::Upload => "Upload",
+        Role::Download => "Download",
+    }
+}
+
+pub(crate) fn file_status(file: &FileStatus) -> String {
+    let result = match &file.outcome {
+        Some(FileOutcome::Completed) => "completed".to_owned(),
+        Some(FileOutcome::Skipped) => "skipped".to_owned(),
+        Some(FileOutcome::Failed(error)) => format!("failed: {}", display_text(&error.message)),
+        None => match file.total {
+            Some(total) => return format!("{}: {} / {total} bytes", file.name, file.bytes),
+            None => "transferring".to_owned(),
+        },
+    };
+    format!("{}: {} bytes, {result}", file.name, file.bytes)
+}
+
+pub(crate) fn display_text(text: &str) -> String {
+    text.chars()
+        .take(160)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
 }
 
 #[cfg(test)]

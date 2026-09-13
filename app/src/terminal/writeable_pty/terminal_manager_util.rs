@@ -68,9 +68,9 @@ pub fn wire_up_pty_controller_with_surface<T: EventLoopSender, S: TerminalSurfac
                     controller.shutdown_pty(ctx);
                 });
             }
-            PtyIntent::StartZmodemUpload { paths } => {
+            PtyIntent::Zmodem(control) => {
                 controller.update(ctx, |controller, ctx| {
-                    controller.start_zmodem_upload(paths, ctx);
+                    controller.zmodem_control(control, ctx);
                 });
             }
             PtyIntent::WriteBytes(bytes) => {

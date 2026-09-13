@@ -621,8 +621,49 @@ pub fn init(app: &mut AppContext) {
             TerminalAction::SendFilesWithZmodem,
         )
         .with_custom_action(CustomAction::SendFilesWithZmodem)
-        .with_context_predicate(id!("Terminal")),
+        .with_context_predicate(id!("Terminal") & id!("ZmodemAvailable")),
+        EditableBinding::new(
+            "terminal:cancel_zmodem_transfer",
+            "Cancel ZMODEM transfer",
+            TerminalAction::CancelZmodemTransfer { id: None },
+        )
+        .with_custom_action(CustomAction::CancelZmodemTransfer)
+        .with_context_predicate(id!("Terminal") & id!("ZmodemBusy")),
     ]);
+
+    crate::settings_view::ToggleSettingActionPair::add_toggle_setting_action_pairs_as_bindings(
+        vec![
+            crate::settings_view::ToggleSettingActionPair::new(
+                "ZMODEM transfers",
+                TerminalAction::ToggleZmodemEnabled,
+                &id!("Terminal"),
+                "ZmodemEnabled",
+            )
+            .is_supported_on_current_platform(cfg!(target_os = "macos")),
+            crate::settings_view::ToggleSettingActionPair::new(
+                "ZMODEM download directory prompt",
+                TerminalAction::ToggleZmodemAskDirectory,
+                &id!("Terminal"),
+                "ZmodemAskDirectory",
+            )
+            .is_supported_on_current_platform(cfg!(target_os = "macos")),
+            crate::settings_view::ToggleSettingActionPair::new(
+                "ZMODEM file drop uploads",
+                TerminalAction::ToggleZmodemDrag,
+                &id!("Terminal"),
+                "ZmodemDrag",
+            )
+            .is_supported_on_current_platform(cfg!(target_os = "macos")),
+            crate::settings_view::ToggleSettingActionPair::new(
+                "ZMODEM cross-terminal transfers",
+                TerminalAction::ToggleZmodemCrossTransfer,
+                &id!("Terminal"),
+                "ZmodemCrossTransfer",
+            )
+            .is_supported_on_current_platform(cfg!(target_os = "macos")),
+        ],
+        app,
+    );
 
     app.register_editable_bindings([
         EditableBinding::new(

@@ -62,3 +62,50 @@
 3. Command Palette 在 Agenterm 里整体不可用（`97f6512` 删菜单时连带失效），可能影响其他功能，未处理。
 4. 未做：传输进度面板/取消按钮（当前只有终端内进度行与 toast）、Windows 平台的流控处理
    （`set_flow_control` 在非 unix 为 no-op）。
+
+## 2026-09-12 22:45：新工作区接手与方案重新评估
+
+- 用户要求继续此 feature，功能对齐 `/Users/nickhaoxu/my-studio/WeTERM`，允许重新评估原路径。
+- 工作区 `/Users/nickhaoxu/my-studio/agenterm` 最初干净，已从 main 切到本地跟踪分支
+  `feat/zmodem-rzsz`，HEAD `9fd3f9f`；未合并 origin/main 的三条无关 Drive 提交。
+- 使用 planning 重新调查；investigate 的专用 AskUserQuestion 工具不可用，未执行其互动工作流，
+  以 planning 的只读调研继续。memory quick pass 无本 feature 的相关记录，未据其作结论。
+- WeTERM 的 xweterm 子模块远端不可访问，改用已安装 3.5.7 的 asar 只读代码作行为参照。
+- 新增 `investigation.md`，区分源码事实、历史推断和验证缺口；重新核实取消序列、计时器、
+  I/O、会话隔离、事件次序、termios 恢复及诊断内容风险。
+- 当前基线：warp_terminal 全包 nextest 594 passed / 2 skipped，含 39 ZMODEM 单测和
+  5 真实 lrzsz 测试；定向 Clippy 和 format --check 通过。未运行 GUI 验收。
+- 修订 plan.md，替代与源码不一致的旧契约；spec/tasks 仍不存在，不能标记完成。
+- 本轮不修改产品源码、不提交、不推送。下一步为 Gate: Plan Approval。
+
+## 2026-09-12 22:55：Plan Approval 通过，开始 spec
+
+- 用户回复“可以”，批准上一轮完整 plan，包括 macOS GUI 首要交付和可选跨终端转发。
+- 使用 execute-plan 刷新 current_task，读取 spec-writing、section-guide、review-workflow，
+  以及 spec-review/rubric。进入 spec 逐小节流程；用户尚未授权跳过小节确认。
+- 创建 `docs/design-docs/terminal/zmodem-rzsz/spec.md`，仅起草 §1.1 问题与场景；
+  其余小节保留模板位置，未把未完成内容标记为 N/A 或 Approved。
+- §1.1 自检：用户意图来自已批准 plan；代码风险与历史故障复现区分；未限定新方案或实现任务。
+- 派发只读独立 spec-review，reviewer `01a0961e-c412-75f0-94ec-254a93ef8aa7`，范围仅 §1.1。
+- 本轮仍无产品源代码改动、commit 或 push；前一轮测试结果未冒充本轮重新执行。
+- 首次独立评审 NEEDS_REVISION：§1.1 混入目标/范围声明；已删除这些声明并保留于已批准 plan，
+  待后续相应小节起草。收紧测试结果摘要，明确源码证据性质，增加调查记录链接。
+- 同一 reviewer 聚焦复核结论 PASS，无剩余阻塞或澄清问题。这里只是小节评审通过，非 spec 批准。
+- `git diff --check` 和调查链接存在性检查通过；下一步等待用户确认 §1.1，然后起草 §1.2。
+
+## 2026-09-12：用户授权自主推进
+
+- 用户明确要求“跳过确认……继续直到完成功能或者遇到需要我确认的地方”。
+- 常规小节及 spec 的人工停顿改为授权自主推进；不跳过独立 spec/code review，不扩大生产、提交或依赖授权。
+- 自检每个 spec subsection：需求不依赖新机制，设计覆盖批准范围，资源预算为自主工程决定而非历史实测。
+- 跨终端转发采用临时磁盘分阶段方案，不增加运行时；明确 UI 两阶段与磁盘代价，不宣称零落盘。
+- 独立 spec review 指出并已关闭三项：取消/发布裁决、未退出 worker 配额、跨端发命令前 shell 状态验证。
+  reviewer 复核 PASS；已按用户授权进入实现，不再逐项要求确认。
+- GUI 基线 `cargo check -p warp --lib` 通过，`cargo build -p warp --bin warp` 通过（旧代码基线缓存）。
+- 并行实现：Hilbert T1 native worker；Euler T2 detector（已交付、待集成编译）后接 T6 harness；
+  Bernoulli T4A settings（已交付、待集成编译）后接 T5 cross coordinator；Feynman T3 PTY；Carver T4 GUI。
+- 本地 SSH 验收环境：临时目录 `/tmp/agenterm-zmodem-ssh.G3cpoT`，独立 host/client key；
+  sshd 仅监听 127.0.0.1:22981，禁止 TCP 转发，不修改系统 SSH 配置。连接返回 LOCAL_SSH_OK。
+  sshd 由本轮 exec session 37565 托管，验收后需停止；不读取或复制用户线上密钥。
+- GUI 二进制素材 `/tmp/agenterm-zmodem-acceptance.XdZlpR/binary-16m.bin`，16 MiB 随机内容，
+  SHA-256 `f987c0cd6c986ac2650221b39482fde55f2f2583031192c90bfcefa6740448df`。

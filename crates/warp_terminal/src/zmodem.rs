@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 pub use zmodem2::{Action, Error as ZmodemError, Event, FileInfo, Position, Receiver, Sender};
 
+#[path = "zmodem_runtime.rs"]
+pub mod runtime;
+
 /// ZMODEM pad character.
 pub const ZPAD: u8 = b'*';
 /// ZMODEM data link escape.
@@ -969,7 +972,7 @@ fn own_event(event: Event<'_>) -> OwnedEvent {
             name: String::from_utf8_lossy(info.name).into_owned(),
             size: info.size.map(Position::get),
         },
-        Event::FileCompleted => OwnedEvent::FileCompleted,
+        Event::FileCompleted | Event::FileSkipped => OwnedEvent::FileCompleted,
         Event::SessionCompleted => OwnedEvent::SessionCompleted,
         Event::Aborted => OwnedEvent::Aborted,
         _ => OwnedEvent::Aborted,
@@ -985,6 +988,7 @@ const ZDLE_TABLE: [u8; 0x100] = {
         index += 1;
     }
     // Control characters ZMODEM must not put on the wire bare.
+    table[0x0a] = 0x4a;
     table[0x0d] = 0x4d;
     table[0x10] = 0x50;
     table[0x11] = 0x51;

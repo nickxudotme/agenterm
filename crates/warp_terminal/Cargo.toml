@@ -52,6 +52,7 @@ smallvec.workspace = true
 smol_str.workspace = true
 string-offset.workspace = true
 static_assertions.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 typed-path.workspace = true
 unicode-general-category.workspace = true

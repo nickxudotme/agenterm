@@ -13,6 +13,7 @@ pub mod test_util;
 pub mod util;
 pub mod writeable_pty;
 pub mod zmodem;
+pub mod zmodem_detector;
 
 pub use runtime::*;
 

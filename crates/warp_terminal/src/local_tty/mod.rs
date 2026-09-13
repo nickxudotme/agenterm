@@ -78,16 +78,6 @@ pub trait EventedPty: EventedReadWrite {
 
     /// Terminate the PTY process
     fn kill(self) -> Result<()>;
-
-    /// Enables or disables software flow control on the line.
-    ///
-    /// ZMODEM carries arbitrary binary, so `0x11` and `0x13` inside a transfer
-    /// are ordinary data. With `IXON` set the line discipline eats them as
-    /// XON/XOFF, corrupting frames and stalling the transfer, so it is turned
-    /// off while one is in progress and restored afterwards.
-    fn set_flow_control(&mut self, _enabled: bool) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

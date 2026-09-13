@@ -24,16 +24,21 @@ use super::settings_page::{
     Category, CategoryHeader, HEADER_FONT_SIZE, HEADER_PADDING, LocalOnlyIconState, MatchData,
     PageType, SettingsPageEvent, SettingsPageMeta, SettingsPageViewHandle, SettingsWidget,
     ToggleState, add_setting, render_alternating_color_list, render_body_item,
-    render_dropdown_item, render_page_title,
+    render_body_item_label, render_dropdown_item, render_page_title,
 };
 use super::{SettingsAction, SettingsSection, ToggleSettingActionPair, flags};
 use crate::appearance::Appearance;
+use crate::editor::{EditorView, Event as EditorEvent, SingleLineEditorOptions, TextOptions};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::TelemetryEvent;
 use crate::settings::{ReuseExistingSshControlMaster, SshSettings};
 use crate::terminal::warpify::settings::{
     EnableSshWarpification, SshExtensionInstallMode, SshExtensionInstallModeSetting,
     WarpifySettings, WarpifySettingsChangedEvent,
+};
+use crate::terminal::zmodem_settings::{
+    ZmodemDownloadDirectory, ZmodemOverwritePolicy, ZmodemOverwritePolicySetting, ZmodemSettings,
+    ZmodemSettingsChangedEvent, ZmodemUploadCommand,
 };
 use crate::ui_components::blended_colors;
 use crate::view_components::dropdown::{Dropdown, DropdownItem};
@@ -88,6 +93,9 @@ pub struct WarpifyPageView {
     add_denylisted_commands_editor: ViewHandle<SubmittableTextInput>,
 
     ssh_extension_install_mode_dropdown: ViewHandle<Dropdown<WarpifyPageAction>>,
+    zmodem_download_directory_editor: ViewHandle<EditorView>,
+    zmodem_upload_command_editor: ViewHandle<EditorView>,
+    zmodem_overwrite_policy_dropdown: ViewHandle<Dropdown<WarpifyPageAction>>,
 }
 
 impl WarpifyPageView {
@@ -134,6 +142,112 @@ impl WarpifyPageView {
         let ssh_extension_install_mode_dropdown =
             Self::create_ssh_extension_install_mode_dropdown(ctx);
 
+        let zmodem_download_directory_editor = ctx.add_typed_action_view(|ctx| {
+            let mut editor = EditorView::single_line(
+                SingleLineEditorOptions {
+                    text: TextOptions::ui_font_size(Appearance::as_ref(ctx)),
+                    ..Default::default()
+                },
+                ctx,
+            );
+            let directory = ZmodemSettings::as_ref(ctx).download_directory.to_string();
+            editor.set_buffer_text(&directory, ctx);
+            editor.set_placeholder_text("Downloads", ctx);
+            editor
+        });
+        ctx.subscribe_to_view(&zmodem_download_directory_editor, |me, _, event, ctx| {
+            if matches!(event, EditorEvent::Enter | EditorEvent::Blurred) {
+                let directory = me
+                    .zmodem_download_directory_editor
+                    .as_ref(ctx)
+                    .buffer_text(ctx);
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.download_directory.set_value(directory, ctx));
+                });
+            } else if matches!(event, EditorEvent::Escape) {
+                me.update_zmodem_download_directory_editor(ctx);
+                ctx.emit(SettingsPageEvent::FocusModal);
+            }
+        });
+
+        let zmodem_upload_command_editor = ctx.add_typed_action_view(|ctx| {
+            let mut editor = EditorView::single_line(
+                SingleLineEditorOptions {
+                    text: TextOptions::ui_font_size(Appearance::as_ref(ctx)),
+                    ..Default::default()
+                },
+                ctx,
+            );
+            let command = ZmodemSettings::as_ref(ctx).upload_command.to_string();
+            editor.set_buffer_text(&command, ctx);
+            editor.set_placeholder_text("rz", ctx);
+            editor
+        });
+        ctx.subscribe_to_view(&zmodem_upload_command_editor, |me, _, event, ctx| {
+            if matches!(event, EditorEvent::Enter | EditorEvent::Blurred) {
+                let command = me.zmodem_upload_command_editor.as_ref(ctx).buffer_text(ctx);
+                let command = if command.trim().is_empty() {
+                    "rz".to_owned()
+                } else {
+                    command.trim().to_owned()
+                };
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.upload_command.set_value(command, ctx));
+                });
+                me.update_zmodem_upload_command_editor(ctx);
+            } else if matches!(event, EditorEvent::Escape) {
+                me.update_zmodem_upload_command_editor(ctx);
+                ctx.emit(SettingsPageEvent::FocusModal);
+            }
+        });
+
+        let zmodem_overwrite_policy_dropdown = ctx.add_typed_action_view(|ctx| {
+            let policy = *ZmodemSettings::as_ref(ctx).overwrite_policy.value();
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.set_top_bar_max_width(SSH_EXTENSION_DROPDOWN_WIDTH);
+            dropdown.set_menu_width(SSH_EXTENSION_DROPDOWN_WIDTH, ctx);
+            dropdown.add_items(
+                ZmodemOverwritePolicy::iter()
+                    .map(|policy| {
+                        DropdownItem::new(
+                            policy.display_name(),
+                            WarpifyPageAction::SetZmodemOverwritePolicy(policy),
+                        )
+                    })
+                    .collect(),
+                ctx,
+            );
+            dropdown
+                .set_selected_by_action(WarpifyPageAction::SetZmodemOverwritePolicy(policy), ctx);
+            dropdown
+        });
+        ctx.subscribe_to_model(&ZmodemSettings::handle(ctx), |me, _, event, ctx| {
+            match event {
+                ZmodemSettingsChangedEvent::ZmodemDownloadDirectory { .. } => {
+                    me.update_zmodem_download_directory_editor(ctx);
+                }
+                ZmodemSettingsChangedEvent::ZmodemUploadCommand { .. } => {
+                    me.update_zmodem_upload_command_editor(ctx);
+                }
+                ZmodemSettingsChangedEvent::ZmodemOverwritePolicySetting { .. } => {
+                    let policy = *ZmodemSettings::as_ref(ctx).overwrite_policy.value();
+                    me.zmodem_overwrite_policy_dropdown
+                        .update(ctx, |dropdown, ctx| {
+                            dropdown.set_selected_by_action(
+                                WarpifyPageAction::SetZmodemOverwritePolicy(policy),
+                                ctx,
+                            );
+                        });
+                }
+                ZmodemSettingsChangedEvent::ZmodemEnabled { .. }
+                | ZmodemSettingsChangedEvent::ZmodemAskDownloadDirectory { .. }
+                | ZmodemSettingsChangedEvent::ZmodemLastDirectory { .. }
+                | ZmodemSettingsChangedEvent::ZmodemDragEnabled { .. }
+                | ZmodemSettingsChangedEvent::ZmodemCrossTransferEnabled { .. } => {}
+            }
+            ctx.notify();
+        });
+
         let mut instance = Self {
             page: Self::build_page(ctx),
             remove_added_command_button_states: Default::default(),
@@ -141,10 +255,29 @@ impl WarpifyPageView {
             remove_denylisted_command_button_states: Default::default(),
             add_denylisted_commands_editor,
             ssh_extension_install_mode_dropdown,
+            zmodem_download_directory_editor,
+            zmodem_upload_command_editor,
+            zmodem_overwrite_policy_dropdown,
         };
 
         instance.update_button_states(warpify_settings_handle, ctx);
         instance
+    }
+
+    fn update_zmodem_download_directory_editor(&mut self, ctx: &mut ViewContext<Self>) {
+        let directory = ZmodemSettings::as_ref(ctx).download_directory.to_string();
+        self.zmodem_download_directory_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_buffer_text(&directory, ctx);
+            });
+    }
+
+    fn update_zmodem_upload_command_editor(&mut self, ctx: &mut ViewContext<Self>) {
+        let command = ZmodemSettings::as_ref(ctx).upload_command.to_string();
+        self.zmodem_upload_command_editor
+            .update(ctx, |editor, ctx| {
+                editor.set_buffer_text(&command, ctx);
+            });
     }
 
     fn build_page(ctx: &mut ViewContext<Self>) -> PageType<Self> {
@@ -165,6 +298,15 @@ impl WarpifyPageView {
             categories.push(Category::with_header(
                 CategoryHeader::new("SSH").with_subtitle("Warpify your interactive SSH sessions."),
                 vec![Box::new(SSHWidget::default())],
+            ));
+        }
+        if ZmodemSettings::as_ref(ctx)
+            .enabled
+            .is_supported_on_current_platform()
+        {
+            categories.push(Category::with_header(
+                CategoryHeader::new("ZMODEM"),
+                vec![Box::new(ZmodemWidget::default())],
             ));
         }
         PageType::new_categorized(categories, None)
@@ -375,6 +517,11 @@ pub enum WarpifyPageAction {
     ToggleReuseSshControlMaster,
     /// Set the SSH extension installation mode (always ask / always install / always skip).
     SetSshExtensionInstallMode(SshExtensionInstallMode),
+    ToggleZmodem,
+    ToggleZmodemAskDownloadDirectory,
+    ToggleZmodemDrag,
+    ToggleZmodemCrossTransfer,
+    SetZmodemOverwritePolicy(ZmodemOverwritePolicy),
     OpenUrl(String),
 }
 
@@ -444,6 +591,31 @@ impl TypedActionView for WarpifyPageView {
                         },
                         ctx
                     );
+                });
+            }
+            ToggleZmodem => {
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.enabled.toggle_and_save_value(ctx));
+                });
+            }
+            ToggleZmodemAskDownloadDirectory => {
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.ask_download_directory.toggle_and_save_value(ctx));
+                });
+            }
+            ToggleZmodemDrag => {
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.drag_enabled.toggle_and_save_value(ctx));
+                });
+            }
+            ToggleZmodemCrossTransfer => {
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.cross_transfer_enabled.toggle_and_save_value(ctx));
+                });
+            }
+            SetZmodemOverwritePolicy(policy) => {
+                ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    report_if_error!(settings.overwrite_policy.set_value(*policy, ctx));
                 });
             }
             OpenUrl(url) => {
@@ -744,6 +916,160 @@ impl SettingsWidget for SSHWidget {
         );
 
         column.finish()
+    }
+}
+
+#[derive(Default)]
+struct ZmodemWidget {
+    enabled_switch_state: SwitchStateHandle,
+    ask_directory_switch_state: SwitchStateHandle,
+    drag_switch_state: SwitchStateHandle,
+    cross_transfer_switch_state: SwitchStateHandle,
+    local_only_icon_tooltip_states: RefCell<HashMap<String, MouseStateHandle>>,
+}
+
+impl ZmodemWidget {
+    fn local_only_icon<S: Setting>(&self, app: &AppContext) -> LocalOnlyIconState {
+        LocalOnlyIconState::for_setting(
+            S::storage_key(),
+            S::sync_to_cloud(),
+            &mut self.local_only_icon_tooltip_states.borrow_mut(),
+            app,
+        )
+    }
+
+    fn render_toggle<S: Setting<Value = bool>>(
+        &self,
+        setting: &S,
+        label: &str,
+        control: (&SwitchStateHandle, WarpifyPageAction),
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let (state, action) = control;
+        render_body_item::<WarpifyPageAction>(
+            label.to_owned(),
+            None,
+            self.local_only_icon::<S>(app),
+            ToggleState::Enabled,
+            appearance,
+            appearance
+                .ui_builder()
+                .switch(state.clone())
+                .check(*setting.value())
+                .build()
+                .on_click(move |ctx, _, _| ctx.dispatch_typed_action(action.clone()))
+                .finish(),
+            None,
+        )
+    }
+
+    fn render_text_editor<S: Setting>(
+        &self,
+        label: &str,
+        editor: &ViewHandle<EditorView>,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        Container::new(
+            Flex::column()
+                .with_child(render_body_item_label::<WarpifyPageAction>(
+                    label.to_owned(),
+                    None,
+                    None,
+                    self.local_only_icon::<S>(app),
+                    ToggleState::Enabled,
+                    appearance,
+                ))
+                .with_child(
+                    appearance
+                        .ui_builder()
+                        .text_input(editor.clone())
+                        .with_style(UiComponentStyles {
+                            margin: Some(Coords::default().top(BUILT_IN_TEXT_INPUT_MARGIN)),
+                            ..Default::default()
+                        })
+                        .build()
+                        .finish(),
+                )
+                .finish(),
+        )
+        .with_margin_bottom(ITEM_VERTICAL_SPACING)
+        .finish()
+    }
+}
+
+impl SettingsWidget for ZmodemWidget {
+    type View = WarpifyPageView;
+
+    fn search_terms(&self) -> &str {
+        "zmodem rz sz upload download directory overwrite skip rename drag cross terminal transfer"
+    }
+
+    fn render(
+        &self,
+        view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let settings = ZmodemSettings::as_ref(app);
+        Flex::column()
+            .with_child(self.render_toggle(
+                &settings.enabled,
+                "Enable ZMODEM",
+                (&self.enabled_switch_state, WarpifyPageAction::ToggleZmodem),
+                appearance,
+                app,
+            ))
+            .with_child(self.render_toggle(
+                &settings.ask_download_directory,
+                "Ask for download directory",
+                (
+                    &self.ask_directory_switch_state,
+                    WarpifyPageAction::ToggleZmodemAskDownloadDirectory,
+                ),
+                appearance,
+                app,
+            ))
+            .with_child(self.render_text_editor::<ZmodemDownloadDirectory>(
+                "Download directory",
+                &view.zmodem_download_directory_editor,
+                appearance,
+                app,
+            ))
+            .with_child(render_dropdown_item(
+                appearance,
+                "Existing files",
+                None,
+                None,
+                self.local_only_icon::<ZmodemOverwritePolicySetting>(app),
+                None,
+                &view.zmodem_overwrite_policy_dropdown,
+            ))
+            .with_child(self.render_toggle(
+                &settings.drag_enabled,
+                "Upload dropped files with ZMODEM",
+                (&self.drag_switch_state, WarpifyPageAction::ToggleZmodemDrag),
+                appearance,
+                app,
+            ))
+            .with_child(self.render_text_editor::<ZmodemUploadCommand>(
+                "Upload command",
+                &view.zmodem_upload_command_editor,
+                appearance,
+                app,
+            ))
+            .with_child(self.render_toggle(
+                &settings.cross_transfer_enabled,
+                "Cross-terminal transfers",
+                (
+                    &self.cross_transfer_switch_state,
+                    WarpifyPageAction::ToggleZmodemCrossTransfer,
+                ),
+                appearance,
+                app,
+            ))
+            .finish()
     }
 }
 

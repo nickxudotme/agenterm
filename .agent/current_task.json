@@ -1,7 +1,7 @@
 {
-  "task": "warpify-jump-hosts",
-  "task_dir": ".agent/warpify-jump-hosts",
-  "plan_path": ".agent/warpify-jump-hosts/plan.md",
-  "updated_by": "planning",
-  "updated_at": "2026-09-11T01:35:09+08:00"
+  "task": "zmodem-rzsz",
+  "task_dir": ".agent/zmodem-rzsz",
+  "plan_path": ".agent/zmodem-rzsz/plan.md",
+  "updated_by": "execute-plan",
+  "updated_at": "2026-09-12T23:35:42+08:00"
 }

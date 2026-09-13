@@ -141,6 +141,11 @@ use warp_core::context_flag::ContextFlag;
 use warp_core::semantic_selection::SemanticSelection;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warp_errors::{report_error, report_if_error};
+use warp_terminal::zmodem::runtime::{
+    Control as ZmodemControl, ErrorKind as ZmodemErrorKind, FileOutcome as ZmodemFileOutcome,
+    OverwritePolicy, Role as ZmodemRole, TransferError as ZmodemError,
+    TransferEvent as ZmodemEvent, TransferId, TransferOutcome, next_transfer_id,
+};
 use warp_util::local_or_remote_path::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use warp_util::path::LineAndColumnArg;
@@ -504,7 +509,10 @@ use crate::terminal::view::zero_state_block::TerminalViewZeroStateBlock;
 use crate::terminal::warpify::settings::WarpifySettings;
 use crate::terminal::waterfall_gap_element::WaterfallGapElement;
 use crate::terminal::writeable_pty::{PtyIntent, PtyIntentEvent, TerminalSurface};
-use crate::terminal::zmodem_transfer::ZmodemTransfer;
+use crate::terminal::zmodem_settings::{
+    ZmodemOverwritePolicy, ZmodemSettings, ZmodemSettingsChangedEvent,
+};
+use crate::terminal::zmodem_transfer::{ZmodemTransfer, display_text};
 use crate::terminal::{
     AudibleBell, BlockListSettings, BlockListSettingsChangedEvent, CellSizeAndWindowPadding,
     History, HistoryEntry, ShellHost, ShellLaunchData, SizeInfo, SizeUpdate, SizeUpdateReason,
@@ -1763,10 +1771,7 @@ pub enum Event {
     ShutdownPty,
     // TODO: break this event down into higher-level events that hide the
     // `bytes` detail from the view.
-    /// Start a ZMODEM upload of the given local files.
-    StartZmodemUpload {
-        paths: Vec<std::path::PathBuf>,
-    },
+    ZmodemControl(ZmodemControl),
     WriteBytesToPty {
         bytes: Cow<'static, [u8]>,
     },
@@ -2936,6 +2941,8 @@ pub struct TerminalView {
     conversation_details_panel_toggle_mouse_state: warpui::elements::MouseStateHandle,
     /// Mouse state handle for the ambient agent cancel button in the pane header.
     ambient_agent_cancel_mouse_state: warpui::elements::MouseStateHandle,
+    pub(crate) zmodem_transfer: ZmodemTransfer,
+    zmodem_local_pty_ready: bool,
 
     /// First-time cloud agent setup view (full-screen overlay for creating initial environment).
     first_time_cloud_agent_setup_view: ViewHandle<ambient_agent::FirstTimeCloudAgentSetupView>,
@@ -4304,6 +4311,23 @@ impl TerminalView {
 
         let agent_todos_popup = Self::build_agent_todos_popup(ai_context_model.clone(), ctx);
 
+        if ctx.has_singleton_model::<ZmodemSettings>() {
+            ctx.subscribe_to_model(&ZmodemSettings::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, ZmodemSettingsChangedEvent::ZmodemEnabled { .. }) {
+                    if !*ZmodemSettings::as_ref(ctx).enabled {
+                        me.cancel_zmodem_transfer(ctx);
+                    }
+                    if me.zmodem_local_pty_ready {
+                        me.send_zmodem_control(
+                            ZmodemControl::Enable(me.zmodem_available(ctx)),
+                            ctx,
+                        );
+                    }
+                }
+                ctx.notify();
+            });
+        }
+
         let terminal_view_id = ctx.view_id();
         let agent_input_footer = input.as_ref(ctx).agent_input_footer().clone();
         let use_agent_button_bar = ctx.add_typed_action_view(|ctx| {
@@ -4518,6 +4542,8 @@ impl TerminalView {
             orchestration_child_live_unavailable: false,
             conversation_details_panel_toggle_mouse_state: Default::default(),
             ambient_agent_cancel_mouse_state: Default::default(),
+            zmodem_transfer: Default::default(),
+            zmodem_local_pty_ready: false,
             active_init_project_model: None,
             is_pending_aws_login: false,
             manual_pty_shutdown_requested: false,
@@ -8833,6 +8859,8 @@ impl TerminalView {
     /// Shuts down the pty and event loop, terminating the shell process.
     /// Also marks this view as manually shut down for telemetry attribution.
     pub fn shutdown_pty(&mut self, ctx: &mut ViewContext<Self>) {
+        self.cancel_zmodem_transfer(ctx);
+        self.zmodem_local_pty_ready = false;
         self.manual_pty_shutdown_requested = true;
         ctx.emit(Event::ShutdownPty);
     }
@@ -8906,6 +8934,10 @@ impl TerminalView {
         cleared_buffer_len: usize,
         ctx: &mut ViewContext<Self>,
     ) {
+        if self.zmodem_is_busy() {
+            self.cancel_zmodem_transfer(ctx);
+            return;
+        }
         let did_resolve_prompt_suggestion = self
             .resolve_passive_suggestion(PromptSuggestionResolution::Reject { ctrl_c: true }, ctx);
         if did_resolve_prompt_suggestion {
@@ -8945,6 +8977,10 @@ impl TerminalView {
     /// Windows users expect ctrl-c to copy if there is selected text. Otherwise,
     /// we perform the normal ctrl-c action.
     fn ctrl_c(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.zmodem_is_busy() {
+            self.cancel_zmodem_transfer(ctx);
+            return;
+        }
         let (has_block_list_selection, has_alt_screen_selection, active_block_state) = {
             let model = self.model.lock();
             let has_alt_screen_selection = model.alt_screen().selection().is_some();
@@ -12002,6 +12038,17 @@ impl TerminalView {
                 ctx.request_user_attention();
             }
             ModelEvent::Exit { reason } => {
+                self.zmodem_local_pty_ready = false;
+                if let Some(id) = self.zmodem_active_id() {
+                    self.zmodem_transfer.finish(
+                        id,
+                        TransferOutcome::Failed(ZmodemError {
+                            kind: ZmodemErrorKind::WorkerStopped,
+                            message: "Terminal disconnected".to_owned(),
+                        }),
+                    );
+                    self.zmodem_error("ZMODEM transfer stopped: terminal disconnected", ctx);
+                }
                 if !self.manual_pty_shutdown_requested
                     && let Some((conversation_id, command)) =
                         self.maybe_send_agent_exited_shell_telemetry(ctx)
@@ -13068,42 +13115,7 @@ impl TerminalView {
                 ctx.notify();
             }
             ModelEvent::CompletionsFinished(..) => {}
-            ModelEvent::ZmodemDownloadStarted { .. } => {
-                log::info!("ZMODEM download started");
-            }
-            ModelEvent::ZmodemUploadRequested => {
-                // `rz` is already waiting, so prompt right away; requiring a
-                // menu action first means the user must know to run it before
-                // the command they just typed.
-                self.send_files_with_zmodem(ctx);
-            }
-            ModelEvent::ZmodemProgress {
-                file_name,
-                bytes_transferred,
-                bytes_total,
-            } => {
-                ZmodemTransfer::handle(ctx).update(ctx, |transfer, _ctx| {
-                    transfer.note_progress(file_name.clone(), *bytes_transferred, *bytes_total);
-                });
-            }
-            ModelEvent::ZmodemFileData { name, data } => {
-                ZmodemTransfer::handle(ctx).update(ctx, |transfer, _ctx| {
-                    transfer.note_progress(name.clone(), 0, 0);
-                    transfer.append_data(data);
-                });
-            }
-            ModelEvent::ZmodemFileCompleted { .. } => {
-                let window_id = self.window_id;
-                ZmodemTransfer::handle(ctx).update(ctx, |transfer, ctx| {
-                    transfer.finish_file(window_id, ctx);
-                });
-            }
-            ModelEvent::ZmodemFinished { error } => {
-                let window_id = self.window_id;
-                ZmodemTransfer::handle(ctx).update(ctx, |transfer, ctx| {
-                    transfer.finish_transfer(error.clone(), window_id, ctx);
-                });
-            }
+            ModelEvent::Zmodem(event) => self.handle_zmodem_event(event, ctx),
             ModelEvent::ImageReceived {
                 image_id,
                 image_data,
@@ -26368,6 +26380,11 @@ impl TerminalView {
         // Focus this pane when files are dropped on it.
         self.redetermine_global_focus(ctx);
 
+        if self.zmodem_available(ctx) && *ZmodemSettings::as_ref(ctx).drag_enabled {
+            self.start_explicit_zmodem_upload(paths.iter().map(PathBuf::from).collect(), ctx);
+            return;
+        }
+
         // Check if we're in a long-running command
         let is_in_long_running_command = self
             .model
@@ -26458,27 +26475,335 @@ impl TerminalView {
         }
     }
 
-    /// Prompts for local files and starts a ZMODEM upload.
-    ///
-    /// `rz` announces that it is ready and then waits, so this is triggered
-    /// both by detecting that handshake and by the menu entry.
     fn send_files_with_zmodem(&mut self, ctx: &mut ViewContext<Self>) {
-        let config = FilePickerConfiguration::new().allow_multi_select();
+        if !self.zmodem_can_start_explicit(ctx) {
+            self.zmodem_error(
+                "Terminal is busy or shell is not ready. Run rz manually to upload.",
+                ctx,
+            );
+            return;
+        }
+        let Some(identity) = self.zmodem_shell_identity(ctx) else {
+            self.zmodem_error(
+                "Shell is not ready. Run rz manually in the target terminal.",
+                ctx,
+            );
+            return;
+        };
+        if self.zmodem_is_busy() {
+            self.zmodem_error("A ZMODEM transfer is already active in this terminal", ctx);
+            return;
+        }
+        let id = next_transfer_id();
+        if !self.zmodem_transfer.begin_explicit_upload(id) {
+            return;
+        }
+        self.choose_zmodem_upload(id, Some(identity), ctx);
+        ctx.notify();
+    }
+
+    pub(crate) fn zmodem_available(&self, ctx: &AppContext) -> bool {
+        cfg!(all(target_os = "macos", feature = "local_tty"))
+            && self.zmodem_local_pty_ready
+            && *ZmodemSettings::as_ref(ctx).enabled
+    }
+
+    pub(crate) fn zmodem_active_id(&self) -> Option<TransferId> {
+        self.zmodem_transfer.active.as_ref().map(|active| active.id)
+    }
+
+    pub(crate) fn zmodem_is_busy(&self) -> bool {
+        self.zmodem_active_id().is_some()
+    }
+
+    /// The block token also invalidates pickers after a command or subshell transition.
+    pub(crate) fn zmodem_shell_identity(&self, ctx: &AppContext) -> Option<(SessionId, BlockId)> {
+        if !self.zmodem_available(ctx) {
+            return None;
+        }
+        let model = self.model.lock();
+        let block = model.block_list().active_block();
+        if model.shared_session_status().is_sharer_or_viewer()
+            || model.is_alt_screen_active()
+            || !model.block_list().is_bootstrapped()
+            || !block.has_received_precmd()
+            || block.is_executing()
+        {
+            return None;
+        }
+        Some((block.session_id()?, block.id().clone()))
+    }
+
+    pub(crate) fn zmodem_can_start_explicit(&self, ctx: &AppContext) -> bool {
+        !self.zmodem_is_busy() && self.zmodem_shell_identity(ctx).is_some()
+    }
+
+    pub(crate) fn send_zmodem_control(&self, control: ZmodemControl, ctx: &mut ViewContext<Self>) {
+        ctx.emit(Event::ZmodemControl(control));
+    }
+
+    pub(crate) fn cancel_zmodem_transfer(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(id) = self.zmodem_active_id() {
+            self.cancel_zmodem_id(id, ctx);
+        }
+    }
+
+    fn cancel_zmodem_id(&mut self, id: TransferId, ctx: &mut ViewContext<Self>) {
+        if self.zmodem_transfer.cancel(id) {
+            self.send_zmodem_control(ZmodemControl::Cancel { id }, ctx);
+            ctx.notify();
+        }
+    }
+
+    pub(crate) fn zmodem_error(&self, message: impl Into<String>, ctx: &mut ViewContext<Self>) {
+        let window_id = self.window_id;
+        let message = message.into();
+        ToastStack::handle(ctx).update(ctx, |stack, ctx| {
+            stack.add_ephemeral_toast(DismissibleToast::error(message), window_id, ctx);
+        });
+    }
+
+    fn choose_zmodem_upload(
+        &mut self,
+        id: TransferId,
+        identity: Option<(SessionId, BlockId)>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let weak = ctx.handle();
         ctx.open_file_picker(
-            move |result, ctx: &mut ViewContext<Self>| match result {
-                Ok(paths) if !paths.is_empty() => {
-                    let paths: Vec<std::path::PathBuf> =
-                        paths.into_iter().map(std::path::PathBuf::from).collect();
-                    log::info!("ZMODEM upload chosen: {} path(s)", paths.len());
-                    ctx.emit(Event::StartZmodemUpload { paths });
-                }
-                Ok(_) => log::info!("ZMODEM upload cancelled by the user"),
-                Err(error) => {
-                    log::warn!("Could not choose files for ZMODEM upload: {error}");
-                }
+            move |result, ctx| {
+                let Some(view) = weak.upgrade(ctx) else {
+                    return;
+                };
+                view.update(ctx, |me, ctx| {
+                    if !me
+                        .zmodem_transfer
+                        .is_selecting(id, ZmodemRole::Upload, identity.is_some())
+                    {
+                        return;
+                    }
+                    if !me.zmodem_available(ctx) {
+                        me.cancel_zmodem_id(id, ctx);
+                        return;
+                    }
+                    match result {
+                        Ok(paths) if !paths.is_empty() => {
+                            let paths = paths.into_iter().map(PathBuf::from).collect();
+                            if let Some(identity) = identity {
+                                me.complete_explicit_zmodem_upload(id, identity, paths, ctx);
+                            } else {
+                                me.zmodem_transfer.start(id);
+                                me.send_zmodem_control(ZmodemControl::Upload { id, paths }, ctx);
+                            }
+                        }
+                        Ok(_) => me.cancel_zmodem_id(id, ctx),
+                        Err(error) => {
+                            me.cancel_zmodem_id(id, ctx);
+                            me.zmodem_error(format!("Could not choose upload files: {error}"), ctx);
+                        }
+                    }
+                    ctx.notify();
+                });
             },
-            config,
+            FilePickerConfiguration::new().allow_multi_select(),
         );
+    }
+
+    pub(crate) fn start_explicit_zmodem_upload(
+        &mut self,
+        paths: Vec<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Option<TransferId> {
+        let Some(identity) = self.zmodem_shell_identity(ctx) else {
+            self.zmodem_error(
+                "Shell is not ready. Run rz manually in the target terminal.",
+                ctx,
+            );
+            return None;
+        };
+        let id = next_transfer_id();
+        if paths.is_empty() || !self.zmodem_transfer.begin_explicit_upload(id) {
+            self.zmodem_error(
+                "A ZMODEM transfer is already active or no files were selected",
+                ctx,
+            );
+            return None;
+        }
+        self.complete_explicit_zmodem_upload(id, identity, paths, ctx)
+            .then_some(id)
+    }
+
+    fn complete_explicit_zmodem_upload(
+        &mut self,
+        id: TransferId,
+        identity: (SessionId, BlockId),
+        paths: Vec<PathBuf>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        if !self
+            .zmodem_transfer
+            .is_selecting(id, ZmodemRole::Upload, true)
+        {
+            return false;
+        }
+        if self.zmodem_shell_identity(ctx).as_ref() != Some(&identity) {
+            self.cancel_zmodem_id(id, ctx);
+            self.zmodem_error(
+                "The target shell changed or is busy. Run rz manually to upload.",
+                ctx,
+            );
+            return false;
+        }
+        let command = ZmodemSettings::as_ref(ctx).upload_command.trim().to_owned();
+        if command.is_empty() || command.chars().any(char::is_control) {
+            self.cancel_zmodem_id(id, ctx);
+            self.zmodem_error("Set a nonempty, single-line ZMODEM upload command", ctx);
+            return false;
+        }
+        // Paths are sent only to the worker, never interpolated into a shell command.
+        ctx.emit(Event::ExecuteCommand(ExecuteCommandEvent {
+            command,
+            session_id: identity.0,
+            workflow_id: None,
+            workflow_command: None,
+            should_add_command_to_history: true,
+            source: CommandExecutionSource::User,
+        }));
+        self.zmodem_transfer.start(id);
+        self.send_zmodem_control(ZmodemControl::StartUpload { id, paths }, ctx);
+        ctx.notify();
+        true
+    }
+
+    pub(crate) fn handle_zmodem_event(&mut self, event: &ZmodemEvent, ctx: &mut ViewContext<Self>) {
+        if let ZmodemEvent::Requested { id, role } = event {
+            if !self.zmodem_available(ctx) {
+                self.send_zmodem_control(ZmodemControl::Cancel { id: *id }, ctx);
+                return;
+            }
+            if !self.zmodem_transfer.request(*id, *role) {
+                return;
+            }
+            match role {
+                ZmodemRole::Upload => self.choose_zmodem_upload(*id, None, ctx),
+                ZmodemRole::Download => self.choose_zmodem_download(*id, ctx),
+            }
+        } else if self.zmodem_transfer.apply(event) {
+            match event {
+                ZmodemEvent::Finished { outcome, .. } => {
+                    let text = self.zmodem_transfer.status_text().unwrap_or_default();
+                    let toast = match outcome {
+                        TransferOutcome::Completed => DismissibleToast::success(text),
+                        TransferOutcome::Cancelled | TransferOutcome::RemoteCancelled => {
+                            DismissibleToast::default(text)
+                        }
+                        TransferOutcome::Failed(_) => DismissibleToast::error(text),
+                    };
+                    let window_id = self.window_id;
+                    ToastStack::handle(ctx).update(ctx, |stack, ctx| {
+                        stack.add_ephemeral_toast(toast, window_id, ctx);
+                    });
+                }
+                ZmodemEvent::FileResult {
+                    outcome: ZmodemFileOutcome::Failed(error),
+                    ..
+                } => {
+                    self.zmodem_error(display_text(&error.message), ctx);
+                }
+                ZmodemEvent::Requested { .. }
+                | ZmodemEvent::FileStarted { .. }
+                | ZmodemEvent::Progress { .. }
+                | ZmodemEvent::FileResult { .. } => {}
+            }
+        }
+        ctx.notify();
+    }
+
+    fn choose_zmodem_download(&mut self, id: TransferId, ctx: &mut ViewContext<Self>) {
+        let settings = ZmodemSettings::as_ref(ctx);
+        let policy = match *settings.overwrite_policy {
+            ZmodemOverwritePolicy::Skip => OverwritePolicy::Skip,
+            ZmodemOverwritePolicy::Rename => OverwritePolicy::Rename,
+            ZmodemOverwritePolicy::Overwrite => OverwritePolicy::Overwrite,
+        };
+        if !*settings.ask_download_directory {
+            if let Some(directory) = settings.resolved_download_directory() {
+                self.accept_zmodem_download(id, directory, policy, ctx);
+            } else {
+                self.cancel_zmodem_id(id, ctx);
+                self.zmodem_error("Choose a ZMODEM download directory in Settings", ctx);
+            }
+            return;
+        }
+        let weak = ctx.handle();
+        ctx.open_file_picker(
+            move |result, ctx| {
+                let Some(view) = weak.upgrade(ctx) else {
+                    return;
+                };
+                view.update(ctx, |me, ctx| {
+                    if !me
+                        .zmodem_transfer
+                        .is_selecting(id, ZmodemRole::Download, false)
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(paths) if paths.len() == 1 => {
+                            let directory = PathBuf::from(&paths[0]);
+                            let saved = ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| {
+                                settings.last_directory.set_value(paths[0].clone(), ctx)
+                            });
+                            if let Err(error) = saved {
+                                me.zmodem_error(
+                                    format!("Could not remember download directory: {error}"),
+                                    ctx,
+                                );
+                            }
+                            me.accept_zmodem_download(id, directory, policy, ctx);
+                        }
+                        Ok(_) => me.cancel_zmodem_id(id, ctx),
+                        Err(error) => {
+                            me.cancel_zmodem_id(id, ctx);
+                            me.zmodem_error(
+                                format!("Could not choose download directory: {error}"),
+                                ctx,
+                            );
+                        }
+                    }
+                });
+            },
+            FilePickerConfiguration::new().folders_only(),
+        );
+    }
+
+    pub(crate) fn accept_zmodem_download(
+        &mut self,
+        id: TransferId,
+        directory: PathBuf,
+        policy: OverwritePolicy,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !self
+            .zmodem_transfer
+            .is_selecting(id, ZmodemRole::Download, false)
+        {
+            return;
+        }
+        if !self.zmodem_available(ctx) {
+            self.cancel_zmodem_id(id, ctx);
+            return;
+        }
+        self.zmodem_transfer.start(id);
+        self.send_zmodem_control(
+            ZmodemControl::Download {
+                id,
+                directory,
+                policy,
+            },
+            ctx,
+        );
+        ctx.notify();
     }
 
     pub fn initiate_ssh_file_upload(&self, paths: &[String], ctx: &mut ViewContext<Self>) {
@@ -26814,9 +27139,7 @@ impl PtyIntentEvent for Event {
         match self {
             Event::CtrlD => Some(PtyIntent::CtrlD),
             Event::ShutdownPty => Some(PtyIntent::ShutdownPty),
-            Event::StartZmodemUpload { paths } => Some(PtyIntent::StartZmodemUpload {
-                paths: paths.clone(),
-            }),
+            Event::ZmodemControl(control) => Some(PtyIntent::Zmodem(control.clone())),
             Event::WriteBytesToPty { bytes } => Some(PtyIntent::WriteBytes(bytes.clone())),
             Event::WriteAgentInputToPty { bytes, mode } => Some(PtyIntent::WriteAgentInput {
                 bytes: bytes.clone(),
@@ -26839,6 +27162,8 @@ impl PtyIntentEvent for Event {
 impl TerminalSurface for TerminalView {
     #[cfg(feature = "local_tty")]
     fn on_shell_determined(&mut self, ctx: &mut ViewContext<Self>) {
+        self.zmodem_local_pty_ready = !self.model.lock().shared_session_status().is_viewer();
+        self.send_zmodem_control(ZmodemControl::Enable(self.zmodem_available(ctx)), ctx);
         if !self.model.lock().shared_session_status().is_viewer() {
             // Start a timer for the initial session bootstrapping, so that we can log and show a
             // banner to the user if the bootstrapping takes too long
@@ -27250,6 +27575,12 @@ impl TypedActionView for TerminalView {
             | StartFileDropTarget
             | StopFileDropTarget
             | SendFilesWithZmodem
+            | CancelZmodemTransfer { .. }
+            | DismissZmodemStatus { .. }
+            | ToggleZmodemEnabled
+            | ToggleZmodemAskDirectory
+            | ToggleZmodemDrag
+            | ToggleZmodemCrossTransfer
             | RunNativeShellCompletions { .. }
             | OpenTeamSettingsPage
             | HideTelemetryBannerPermanently
@@ -27875,6 +28206,44 @@ impl TypedActionView for TerminalView {
                 });
             }
             SendFilesWithZmodem => self.send_files_with_zmodem(ctx),
+            CancelZmodemTransfer { id } => {
+                if let Some(id) = id.or_else(|| self.zmodem_active_id()) {
+                    self.cancel_zmodem_id(id, ctx);
+                }
+            }
+            DismissZmodemStatus { id } => {
+                if self
+                    .zmodem_transfer
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.id == *id)
+                {
+                    self.zmodem_transfer.last = None;
+                    ctx.notify();
+                }
+            }
+            ToggleZmodemEnabled
+            | ToggleZmodemAskDirectory
+            | ToggleZmodemDrag
+            | ToggleZmodemCrossTransfer => {
+                let result =
+                    ZmodemSettings::handle(ctx).update(ctx, |settings, ctx| match action {
+                        ToggleZmodemEnabled => settings.enabled.set_value(!*settings.enabled, ctx),
+                        ToggleZmodemAskDirectory => settings
+                            .ask_download_directory
+                            .set_value(!*settings.ask_download_directory, ctx),
+                        ToggleZmodemDrag => settings
+                            .drag_enabled
+                            .set_value(!*settings.drag_enabled, ctx),
+                        ToggleZmodemCrossTransfer => settings
+                            .cross_transfer_enabled
+                            .set_value(!*settings.cross_transfer_enabled, ctx),
+                        _ => unreachable!("ZMODEM settings action"),
+                    });
+                if let Err(error) = result {
+                    self.zmodem_error(format!("Could not update ZMODEM setting: {error}"), ctx);
+                }
+            }
             StartFileDropTarget => {
                 let Some(session) = self
                     .active_block_session_id()
@@ -29059,6 +29428,19 @@ impl View for TerminalView {
 
     fn keymap_context(&self, app: &AppContext) -> warpui::keymap::Context {
         let mut context = Self::default_keymap_context();
+        let settings = ZmodemSettings::as_ref(app);
+        for (flag, enabled) in [
+            ("ZmodemAvailable", self.zmodem_available(app)),
+            ("ZmodemBusy", self.zmodem_is_busy()),
+            ("ZmodemEnabled", *settings.enabled),
+            ("ZmodemAskDirectory", *settings.ask_download_directory),
+            ("ZmodemDrag", *settings.drag_enabled),
+            ("ZmodemCrossTransfer", *settings.cross_transfer_enabled),
+        ] {
+            if enabled {
+                context.set.insert(flag);
+            }
+        }
         context.map.insert(
             "TerminalView_BlockSelectionCardinality",
             self.selected_blocks.cardinality().as_keymap_context_value(),
