@@ -2053,14 +2053,12 @@ impl DriveIndex {
                         // If the space is personal, always render the MCP Servers and Rules first
                         if matches!(space, Space::Personal)
                             && matches!(self.index_variant, DriveIndexVariant::MainIndex)
+                            && FeatureFlag::McpServer.is_enabled()
+                            && ContextFlag::ShowMCPServers.is_enabled()
+                            && let Some(mcp_server_collection_item) =
+                                self.render_mcp_server_collection_item(space, appearance, app)
                         {
-                            if FeatureFlag::McpServer.is_enabled()
-                                && ContextFlag::ShowMCPServers.is_enabled()
-                                && let Some(mcp_server_collection_item) =
-                                    self.render_mcp_server_collection_item(space, appearance, app)
-                            {
-                                rendered_space.push(mcp_server_collection_item);
-                            }
+                            rendered_space.push(mcp_server_collection_item);
                         }
 
                         rendered_space.extend(

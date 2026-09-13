@@ -17635,7 +17635,6 @@ impl Workspace {
 
     /// Routes local Warp Drive actions. Running only fills the active terminal's input; it never
     /// creates a terminal implicitly and never executes on its own.
-
     fn handle_warp_drive_event(&mut self, event: &DrivePanelEvent, ctx: &mut ViewContext<Self>) {
         match event {
             DrivePanelEvent::RunWorkflow(workflow) => {
