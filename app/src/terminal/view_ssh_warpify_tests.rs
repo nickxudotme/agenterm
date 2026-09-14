@@ -4,6 +4,7 @@ use std::rc::Rc;
 use warpui::App;
 
 use super::*;
+use crate::terminal::event::BlockCompletedEvent;
 use crate::test_util::terminal::{
     add_window_with_id_and_terminal, initialize_app_for_terminal_view,
 };
@@ -162,6 +163,57 @@ fn non_ssh_subshell_action_still_writes_bootstrap() {
             !writes.borrow().is_empty(),
             "non-SSH subshell behavior must remain available"
         );
+    });
+}
+
+#[test]
+fn block_after_in_band_block_keeps_mouse_states() {
+    App::test((), |mut app| async move {
+        initialize_app_for_terminal_view(&mut app);
+        let (_, terminal) = add_window_with_id_and_terminal(&mut app, None);
+        terminal.update(&mut app, |view, ctx| {
+            let (in_band_index, block_id) = {
+                let model = view.model.lock();
+                (
+                    model.block_list().active_block_index(),
+                    model.active_block_id().clone(),
+                )
+            };
+
+            // Warpified sessions that run generators in-band (e.g. SSH) complete a hidden
+            // in-band block between two user commands.
+            view.handle_terminal_event(
+                &ModelEvent::BlockCompleted(BlockCompletedEvent {
+                    block_type: BlockType::InBandCommand,
+                    num_secrets_obfuscated: 0,
+                    block_index: in_band_index,
+                    block_id,
+                    session_id: None,
+                    restored_block_was_local: None,
+                }),
+                ctx,
+            );
+
+            // Without a mouse state the next block renders no label tooltip, bookmark
+            // button, or "Filter block output" button.
+            let next_block_index = in_band_index + BlockIndex::from(1);
+            assert!(
+                view.block_list_mouse_states
+                    .filter_mouse_states
+                    .contains_key(&next_block_index),
+                "block after an in-band block must have a filter mouse state"
+            );
+
+            // Hidden in-band blocks never render their toolbelt, and a session can create
+            // an unbounded number of them, so their states are dropped instead of accruing.
+            assert!(
+                !view
+                    .block_list_mouse_states
+                    .filter_mouse_states
+                    .contains_key(&in_band_index),
+                "hidden in-band block must not keep a filter mouse state"
+            );
+        });
     });
 }
 

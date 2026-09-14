@@ -12185,23 +12185,44 @@ impl TerminalView {
 
                 let next_block_index = block_completed_event.block_index + BlockIndex::from(1);
 
-                // Don't populate mouse states for In-Band blocks. In-band blocks are hidden to the
-                // user and there can be an arbitrarily large number of blocks as the user types
-                // and interacts with the session. This in turn can cause performance and memory
-                // issues since we clone the mouse states on every render.
-                if !matches!(block_completed_event.block_type, BlockType::InBandCommand) {
+                // The next block always needs mouse states, otherwise its hover toolbelt (label
+                // tooltip, bookmark and "Filter block output" buttons) never renders. Sessions
+                // that run generators in-band (e.g. Warpified SSH sessions) complete hidden
+                // in-band blocks between user commands, so skipping this starved the user block
+                // that followed them.
+                self.block_list_mouse_states
+                    .label_mouse_states
+                    .entry(next_block_index)
+                    .or_default();
+                self.block_list_mouse_states
+                    .bookmark_mouse_states
+                    .entry(next_block_index)
+                    .or_default();
+                self.block_list_mouse_states
+                    .filter_mouse_states
+                    .entry(next_block_index)
+                    .or_default();
+
+                // In-band blocks are hidden to the user and there can be an arbitrarily large
+                // number of blocks as the user types and interacts with the session. This in turn
+                // can cause performance and memory issues since we clone the mouse states on
+                // every render. Now that the block after it has its own states, drop the hidden
+                // block's to keep the maps bounded by the visible blocks.
+                if matches!(block_completed_event.block_type, BlockType::InBandCommand)
+                    && !*BlockVisibilitySettings::as_ref(ctx)
+                        .should_show_in_band_command_blocks
+                        .value()
+                {
+                    let completed_block_index = block_completed_event.block_index;
                     self.block_list_mouse_states
                         .label_mouse_states
-                        .entry(next_block_index)
-                        .or_default();
+                        .remove(&completed_block_index);
                     self.block_list_mouse_states
                         .bookmark_mouse_states
-                        .entry(next_block_index)
-                        .or_default();
+                        .remove(&completed_block_index);
                     self.block_list_mouse_states
                         .filter_mouse_states
-                        .entry(next_block_index)
-                        .or_default();
+                        .remove(&completed_block_index);
                 }
 
                 // Revert the pane title to the conversation name (if any) now that
