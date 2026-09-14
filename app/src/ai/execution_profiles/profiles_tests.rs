@@ -10,8 +10,11 @@ use crate::ai::blocklist::{BlocklistAIHistoryModel, BlocklistAIPermissions};
 use crate::ai::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::ai::execution_profiles::{
     AIExecutionProfile, ActionPermission, CloudAIExecutionProfileModel, ExecutionProfileId,
-    WriteToPtyPermission, create_default_for_tui_from_legacy_settings,
-    create_default_from_legacy_settings,
+    WriteToPtyPermission,
+};
+#[cfg(not(feature = "agent_mode_evals"))]
+use crate::ai::execution_profiles::{
+    create_default_for_tui_from_legacy_settings, create_default_from_legacy_settings,
 };
 use crate::ai::llms::LLMId;
 use crate::ai::mcp::TemplatableMCPServerManager;
@@ -156,6 +159,7 @@ fn collection_with_profile(
     profiles
 }
 
+#[cfg(not(feature = "agent_mode_evals"))]
 #[test]
 fn tui_missing_collection_seeds_agent_decides_for_execute_commands() {
     App::test((), |mut app| async move {
