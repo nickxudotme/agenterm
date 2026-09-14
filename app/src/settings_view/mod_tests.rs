@@ -119,6 +119,53 @@ fn subpage_display_names_are_correct() {
     );
 }
 
+// ── Agenterm (OSS) page set ────────────────────────────────────────
+
+#[test]
+fn oss_settings_pages_keep_every_local_page() {
+    let pages = oss_settings_pages();
+    for section in [
+        SettingsSection::Appearance,
+        SettingsSection::Features,
+        SettingsSection::Keybindings,
+        SettingsSection::Warpify,
+        SettingsSection::Privacy,
+        SettingsSection::About,
+    ] {
+        assert!(
+            pages.contains(&section),
+            "{section} works without an account, the cloud, or an agent"
+        );
+    }
+}
+
+#[test]
+fn oss_settings_pages_drop_account_agent_and_cloud_pages() {
+    let pages = oss_settings_pages();
+    for section in [
+        SettingsSection::Account,
+        SettingsSection::WarpAgent,
+        SettingsSection::AgentProfiles,
+        SettingsSection::AgentMCPServers,
+        SettingsSection::Knowledge,
+        SettingsSection::ThirdPartyCLIAgents,
+        SettingsSection::BillingAndUsage,
+        SettingsSection::CodeIndexing,
+        SettingsSection::EditorAndCodeReview,
+        SettingsSection::CloudEnvironments,
+        SettingsSection::WarpCloudAgentAPIKeys,
+        SettingsSection::Teams,
+        SettingsSection::Referrals,
+        SettingsSection::SharedBlocks,
+        SettingsSection::WarpDrive,
+    ] {
+        assert!(
+            !pages.contains(&section),
+            "{section} needs an account, the cloud, or an agent"
+        );
+    }
+}
+
 // ── slug / from_slug ───────────────────────────────────────────────
 
 /// Every `SettingsSection` variant.

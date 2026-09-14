@@ -470,6 +470,20 @@ pub fn settings_widget_deeplink_target(slug: &str) -> Option<(SettingsSection, &
     }
 }
 
+/// The settings pages shown in Agenterm (the OSS channel): everything that works without an
+/// account, the cloud, or an agent. Pages left out here are also unreachable via deep links,
+/// see the `initial_page` filtering in this module and in `workspace::view`.
+pub(crate) fn oss_settings_pages() -> [SettingsSection; 6] {
+    [
+        SettingsSection::Appearance,
+        SettingsSection::Features,
+        SettingsSection::Keybindings,
+        SettingsSection::Warpify,
+        SettingsSection::Privacy,
+        SettingsSection::About,
+    ]
+}
+
 pub struct DisplayCount(pub usize);
 
 impl Entity for DisplayCount {
@@ -1406,12 +1420,10 @@ impl SettingsView {
         // nowhere else, so this list is the only place membership is declared.
         let is_agenterm = ChannelState::channel() == Channel::Oss;
         let mut nav_items = if is_agenterm {
-            vec![
-                SettingsNavItem::Page(SettingsSection::Appearance),
-                SettingsNavItem::Page(SettingsSection::Keybindings),
-                SettingsNavItem::Page(SettingsSection::Warpify),
-                SettingsNavItem::Page(SettingsSection::About),
-            ]
+            oss_settings_pages()
+                .into_iter()
+                .map(SettingsNavItem::Page)
+                .collect()
         } else {
             vec![
                 SettingsNavItem::Page(SettingsSection::Account),
@@ -1467,14 +1479,8 @@ impl SettingsView {
         }
 
         let initial_page = if is_agenterm {
-            match page {
-                Some(
-                    page @ (SettingsSection::Appearance
-                    | SettingsSection::Keybindings
-                    | SettingsSection::About),
-                ) => page,
-                Some(_) | None => SettingsSection::Appearance,
-            }
+            page.filter(|page| oss_settings_pages().contains(page))
+                .unwrap_or(SettingsSection::Appearance)
         } else {
             match page {
                 Some(SettingsSection::Scripting) if !FeatureFlag::WarpControlCli.is_enabled() => {

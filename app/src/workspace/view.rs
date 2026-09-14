@@ -360,7 +360,9 @@ use crate::settings_view::handoff_environment_creation_modal::{
 use crate::settings_view::keybindings::{KeybindingChangedEvent, KeybindingChangedNotifier};
 use crate::settings_view::mcp_servers_page::MCPServersSettingsPage;
 use crate::settings_view::pane_manager::SettingsPaneManager;
-use crate::settings_view::{SettingsSection, SettingsView, SettingsViewEvent, flags};
+use crate::settings_view::{
+    SettingsSection, SettingsView, SettingsViewEvent, flags, oss_settings_pages,
+};
 #[cfg(all(target_os = "windows", feature = "local_tty"))]
 use crate::shell_indicator::ShellIndicatorType;
 use crate::tab::{
@@ -8661,15 +8663,8 @@ impl Workspace {
         });
 
         let initial_page = if ChannelState::channel() == Channel::Oss {
-            page.filter(|page| {
-                matches!(
-                    page,
-                    SettingsSection::Appearance
-                        | SettingsSection::Keybindings
-                        | SettingsSection::About
-                )
-            })
-            .unwrap_or(SettingsSection::Appearance)
+            page.filter(|page| oss_settings_pages().contains(page))
+                .unwrap_or(SettingsSection::Appearance)
         } else {
             page.unwrap_or_default()
         };

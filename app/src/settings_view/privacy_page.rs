@@ -39,7 +39,7 @@ use super::settings_page::{
 use super::{SettingsAction, SettingsSection, ToggleSettingActionPair, flags};
 use crate::appearance::Appearance;
 use crate::auth::auth_manager::AuthManager;
-use crate::channel::ChannelState;
+use crate::channel::{Channel, ChannelState};
 use crate::modal::{Modal, ModalEvent, ModalViewState};
 use crate::send_telemetry_from_ctx;
 use crate::server::telemetry::TelemetryEvent;
@@ -230,6 +230,17 @@ impl PrivacyPageView {
         }
         widgets.push(Box::new(DataManagementWidget::default()));
         widgets.push(Box::new(PrivacyPolicyWidget::default()));
+
+        // Agenterm has no account and no cloud conversation storage, so those widgets would be
+        // dead entries.
+        if ChannelState::channel() == Channel::Oss {
+            let cloud_ids = [
+                std::any::type_name::<CloudConversationStorageWidget>(),
+                std::any::type_name::<DataManagementWidget>(),
+            ];
+            widgets.retain(|widget| !cloud_ids.contains(&widget.widget_id()));
+        }
+
         PageType::new_uncategorized(widgets, Some(PageTitle::new("Privacy")))
     }
 

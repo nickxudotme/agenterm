@@ -7,7 +7,7 @@ use std::time::Duration;
 use ::settings::{Setting, ToggleableSetting};
 use lazy_static::lazy_static;
 use strum::IntoEnumIterator;
-use warp_core::channel::ChannelState;
+use warp_core::channel::{Channel, ChannelState};
 use warp_core::context_flag::ContextFlag;
 use warp_core::semantic_selection::{
     SemanticSelection, SemanticSelectionChangedEvent, SmartSelectEnabled,
@@ -2773,6 +2773,22 @@ impl FeaturesPageView {
         features_page_view
     }
 
+    /// Widgets that only make sense with an agent, the cloud, or a shared session. Agenterm (the
+    /// OSS channel) has none of those, so they are dropped from the page instead of being shown
+    /// as dead switches.
+    fn agent_and_cloud_widget_ids() -> [&'static str; 8] {
+        [
+            std::any::type_name::<AutosuggestionKeybindingHintWidget>(),
+            std::any::type_name::<AutosuggestionIgnoreButtonWidget>(),
+            std::any::type_name::<AtContextMenuInTerminalModeWidget>(),
+            std::any::type_name::<SlashCommandsInTerminalModeWidget>(),
+            std::any::type_name::<OutlineCodebaseSymbolsForAtContextMenuWidget>(),
+            std::any::type_name::<ShowTerminalInputMessageLineWidget>(),
+            std::any::type_name::<ConfirmCloseSharedSessionWidget>(),
+            std::any::type_name::<WorkflowsInCommandSearch>(),
+        ]
+    }
+
     fn build_page(ctx: &mut ViewContext<Self>) -> PageType<Self> {
         let mut general_widgets: Vec<Box<dyn SettingsWidget<View = Self>>> =
             vec![Box::new(DefaultSessionModeWidget::default())];
@@ -3102,6 +3118,16 @@ impl FeaturesPageView {
             ),
             Category::new("System", system_widgets),
         ];
+
+        let categories = if ChannelState::channel() == Channel::Oss {
+            let hidden_ids = Self::agent_and_cloud_widget_ids();
+            categories
+                .into_iter()
+                .map(|category| category.without_widgets(&hidden_ids))
+                .collect()
+        } else {
+            categories
+        };
 
         PageType::new_categorized(categories, None)
     }

@@ -2106,6 +2106,14 @@ impl<V: warpui::View> Category<V> {
             widgets,
         }
     }
+
+    /// Drops the widgets whose [`SettingsWidget::widget_id`] is in `hidden_ids`. Categories left
+    /// without any widget are dropped when the page is filtered for rendering.
+    pub(super) fn without_widgets(mut self, hidden_ids: &[&str]) -> Self {
+        self.widgets
+            .retain(|widget| !hidden_ids.contains(&widget.widget_id()));
+        self
+    }
 }
 
 /// A [`Category`] with only the results which match a search query.

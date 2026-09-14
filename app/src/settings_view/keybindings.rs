@@ -54,8 +54,9 @@ const CANCEL_BUTTON_TEXT: &str = "Cancel";
 const CLEAR_BUTTON_TEXT: &str = "Clear";
 const SAVE_BUTTON_TEXT: &str = "Save";
 
-fn should_show_binding(binding: &CommandBinding) -> bool {
-    if !matches!(ChannelState::channel(), Channel::Oss) {
+/// Takes the channel explicitly so tests don't have to flip the process-global one.
+fn should_show_binding_in_channel(binding: &CommandBinding, channel: Channel) -> bool {
+    if !matches!(channel, Channel::Oss) {
         return true;
     }
 
@@ -66,6 +67,8 @@ fn should_show_binding(binding: &CommandBinding) -> bool {
             | Some(BindingGroup::Navigation)
             | Some(BindingGroup::KeyboardShortcuts)
             | Some(BindingGroup::Terminal)
+            | Some(BindingGroup::AutoUpdate)
+            | Some(BindingGroup::Notifications)
     );
     if !supported_group {
         return false;
@@ -89,6 +92,10 @@ fn should_show_binding(binding: &CommandBinding) -> bool {
     ]
     .iter()
     .any(|term| name.contains(term))
+}
+
+fn should_show_binding(binding: &CommandBinding) -> bool {
+    should_show_binding_in_channel(binding, ChannelState::channel())
 }
 
 /// Notifier for custom keybinding changed. Views could subscribe to this for
@@ -1188,3 +1195,7 @@ impl SettingsWidget for KeybindingsWidget {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "keybindings_tests.rs"]
+mod tests;
